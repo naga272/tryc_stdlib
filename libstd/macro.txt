@@ -1,0 +1,44 @@
+#ifndef MACRO_STD_TXT
+#define MACRO_STD_TXT
+
+#define __unix__
+
+#ifdef __unix__
+
+#define SYS_RT_SIGACTION 13
+#define SYS_RT_SIGPROCMASK 14
+#define SYS_RT_SIGRETURN 15
+
+#define SYS_PWRITE64 18
+#define SYS_READV 19
+#define SYS_WRITEV 20
+#define SYS_PIPE 22
+#define SYS_SELECT 23
+#define SYS_SCHED_YELD 24
+#define SYS_MREMAP 25
+#define SYS_MSYNC 26
+#define SYS_MINCORE 27
+#define SYS_MADVISE 28
+#define SYS_SHMGET 29
+#define SYS_SHMAT 30
+#define SYS_SHMCTL 31
+#define SYS_PAUSE 34
+#define SYS_NANOSLEEP 35
+#define SYS_GETITIMER 36
+#define SYS_ALARM 37
+#define SYS_SETITEMER 38
+#define SYS_SENDFILE 40
+#define SYS_SENDTO 44
+#define SYS_RECVFROM 45
+#define SYS_SENDMSG 46
+#define SYS_RECVMSG 47
+
+#endif
+
+#ifdef win32
+
+// eww windows D:
+
+#endif
+
+#endif

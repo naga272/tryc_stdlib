@@ -1,0 +1,14 @@
+libextern </usr/lib/x86_64-linux-gnu/libmariadb.so>
+
+#include <libstd/stdio>
+
+extern class MYSQL
+
+extern def mysql_init(mysql: MYSQL) -> MYSQL
+
+extern def mysql_real_connect(mysql: MYSQL, host: str, user: str, passwd: str, db: str, port: int, socket: str, flags: int) -> MYSQL
+
+extern def mysql_query(mysql: MYSQL, query: str) -> int
+
+extern def mysql_close(mysql: MYSQL) -> None
+

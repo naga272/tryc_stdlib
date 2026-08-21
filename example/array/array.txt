@@ -1,0 +1,18 @@
+#include <libstd/stdio>
+#include <libstd/file>
+
+
+def main() -> int:
+    arr = new int[5]
+    arr[0] = 10
+    arr[1] = 20
+    x = arr[0] + arr[1]
+    print(itoa(x) + "\n")
+    return 0
+
+
+main()
+
+
+array = new Stat[10]
+print(itoa(array[1].st_size) + "\n")

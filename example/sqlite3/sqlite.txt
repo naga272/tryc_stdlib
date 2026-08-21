@@ -1,0 +1,21 @@
+#include <libstd/sqlite3>
+
+
+dbpath = "./test.db"
+db1 =: sqlite3
+
+
+result = sqlite3_open(dbpath, &db1)
+
+response = sqlite3_exec_w(db1, "CREATE TABLE IF NOT EXISTS Users(valore INTEGER);")
+
+val = 0
+
+while val < 10:
+    response = sqlite3_exec_w(db1, "INSERT INTO Users(valore) VALUES(" + itoa(val) + ");")
+    print(itoa(val) + " | insert avvenuto con successo\n")
+    val++
+
+sqlite3_close(db1)
+
+print(sqlite3_libversion() + "\n")

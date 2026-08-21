@@ -1,0 +1,59 @@
+#include <libstd/stdio>
+#include <libstd/time>
+
+
+/*
+* Esempio che testa le funzione di libstd/time.
+*/
+
+
+print("\n\n                OROLOGIO\n\n")
+
+print("timestamp():    " + itoa(timestamp()) + " sec dall'Epoch Unix\n")
+print("timestamp_ms(): " + itoa(timestamp_ms()) + " ms dall'Epoch Unix\n")
+
+wall = new Timespec()
+now(wall)
+print("now() grezzo -> tv_sec=" + itoa(wall.tv_sec) + " tv_nsec=" + itoa(wall.tv_nsec) + "\n")
+
+mono = new Timespec()
+monotonic(mono)
+print("monotonic() -> tv_sec=" + itoa(mono.tv_sec) + " tv_nsec=" + itoa(mono.tv_nsec) + "\n")
+
+print("\nRisoluzione CLOCK_REALTIME:  " + itoa(clock_resolution_ns(CLOCK_REALTIME)) + " ns\n")
+print("Risoluzione CLOCK_MONOTONIC: " + itoa(clock_resolution_ns(CLOCK_MONOTONIC)) + " ns\n")
+
+
+print("\n\n            MISURARE DURATE\n\n")
+
+print("CPU time (processo) prima dell'attesa: " + itoa(cpu_time_ms()) + " ms\n")
+print("CPU time (thread) prima dell'attesa:   " + itoa(thread_cpu_time_ms()) + " ms\n")
+
+t0 = new Timespec()
+monotonic(t0)
+
+sleep_ms(150)
+sleep_seconds(1)
+
+print("\nTempo effettivamente trascorso, via since_ms (atteso >= 1150 ms): " + itoa(since_ms(t0)) + " ms\n")
+
+t1 = new Timespec()
+monotonic(t1)
+print("Stesso intervallo, misurato a mano con elapsed_ms(t0, t1):         " + itoa(elapsed_ms(t0, t1)) + " ms\n")
+
+print("\nCPU time (processo) dopo l'attesa: " + itoa(cpu_time_ms()) + " ms")
+print(" (quasi invariato rispetto a prima: dormire non consuma CPU)\n")
+
+
+print("\n\n PRIMITIVI GREZZI\n\n")
+
+raw_tp = new Timespec()
+sys_clock_gettime(CLOCK_REALTIME, raw_tp)
+print("sys_clock_gettime grezzo (CLOCK_REALTIME): " + itoa(raw_tp.tv_sec) + " sec\n")
+
+request = new Timespec()
+remain = new Timespec()
+request.tv_sec = 0
+request.tv_nsec = 50000000  // 50 ms
+sys_clock_nanosleep(CLOCK_MONOTONIC, TIMER_RELATIVE, request, remain)
+print("sys_clock_nanosleep completato\n")

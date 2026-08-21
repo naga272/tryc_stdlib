@@ -1,0 +1,62 @@
+#include <libstd/macro>
+#include <libstd/stdio>
+
+// __unix__ e' una macro che viene definita in libstd/macro
+
+#ifdef __unix__
+#define macro1 22
+#define macro2 "output per os Unix\n"
+#endif
+
+#ifndef __unix__
+#define macro1 120
+#define macro2 "output per os not Unix\n"
+#endif
+
+val = macro2
+
+print(val)
+
+/*
+* Test del ciclo #for del precompilatore.
+* #for e' un'espansione a tempo di compilazione
+* il corpo tra #for e #endfor viene rigenerato una
+* volta per ogni iterazione, con la variabile del ciclo esposta come
+* macro (sostituita nel testo come una #define qualsiasi).
+*/
+#for (i = 0; i < 5; i++)
+print("iter " + itoa(i) + "\n")
+#endfor
+
+// #for annidati, con step diversi (i++ e j += 2)
+#for (i = 0; i < 2; i++)
+    #for (j = 0; j < 6; j += 2)
+print("i=" + itoa(i) + " j=" + itoa(j) + "\n")
+    #endfor
+#endfor
+
+
+/*
+* Macro con parametri (stile C) e macro multi-riga.
+*/
+
+#define SQUARE(x) ((x) * (x))
+#define ADD(a, b) ((a) + (b))
+
+// una macro con parametri puo' richiamarne un'altra nel proprio corpo
+#define SUM_OF_SQUARES(a, b) (SQUARE(a) + SQUARE(b))
+
+// macro multi-riga: '\' a fine riga continua la #define sulla riga successiva
+#define GREET(name) \
+    print("Hello, " + name + "!\n")
+
+val1 = SQUARE(5)
+print("SQUARE(5) = " + itoa(val1) + "\n")
+
+val2 = ADD(2, 3)
+print("ADD(2, 3) = " + itoa(val2) + "\n")
+
+val3 = SUM_OF_SQUARES(2, 3)
+print("SUM_OF_SQUARES(2, 3) = " + itoa(val3) + "\n")
+
+GREET("world")

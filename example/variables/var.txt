@@ -1,0 +1,24 @@
+#include <libstd/stdio>
+
+// dichiara var1 nella sezione .data, e' di tipo str
+var1 = "Hello "
+
+// dichiara var2 nella sezione .data, e' di tipo str
+var2 = "World\n"
+
+print(var1 + var2)
+
+
+def test() -> str:
+    return "Hello World"
+
+var3 = 15 + 42 * 22
+
+var1 = (
+    "Hello World "
+    test() + test(
+        
+    )
+)
+
+print(var1)

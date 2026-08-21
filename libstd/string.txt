@@ -1,0 +1,464 @@
+
+def strlen(stringa: str) -> int:
+    /*
+    * Calcola la lunghezza di una stringa terminata da '\0',
+    * scandendo 16 byte alla volta con istruzioni SSE4.2
+    * argomenti:
+    *   stringa: stringa di cui calcolare la lunghezza
+    * return: numero di caratteri prima del terminatore
+    */
+    asminline (
+        xor rax, rax
+        .loop:
+            movdqu xmm0, [rdi + rax]
+            pxor xmm1, xmm1
+            pcmpeqb xmm0, xmm1
+            pmovmskb ecx, xmm0
+            test ecx, ecx
+            jnz .found
+            add rax, 16
+            jmp .loop
+        .found:
+            tzcnt ecx, ecx
+            add eax, ecx
+    ) endasm
+
+
+def char_to_int(char: char) -> int:
+    /*
+    * Converte un carattere nel suo codice ascii.
+    * argomenti:
+    *   char: carattere da convertire
+    * return: codice ASCII di char (0-255)
+    */
+    asminline(
+        movzx eax, dil
+    )endasm
+
+
+def int_to_char(x: int) -> char:
+    /*
+    * Converte un codice ASCII nel carattere corrispondente.
+    * argomenti:
+    *   x: codice ASCII da convertire (0-255)
+    * return: il carattere corrispondente
+    */
+    asminline(
+        mov al, dil
+    )endasm
+
+
+def isupper(char: char) -> int:
+    /*
+    * Controlla se un carattere e' maiuscolo (A-Z).
+    * argomenti:
+    *   char: carattere da controllare
+    * return: 1 se maiuscolo, 0 altrimenti
+    */
+    val = char_to_int(char)
+    if val < 65:
+        return 0
+    if val > 90:
+        return 0
+    return 1
+
+
+def islower(char: char) -> int:
+    /*
+    * Controlla se un carattere e' minuscolo (a-z).
+    * argomenti:
+    *   char: carattere da controllare
+    * return: 1 se minuscolo, 0 altrimenti
+    */
+    val = char_to_int(char)
+    if val < 97:
+        return 0
+    if val > 122:
+        return 0
+    return 1
+
+
+def isnumeric(stringa: char) -> int:
+    /*
+    * Controlla se un carattere e' una cifra decimale (0-9).
+    * argomenti:
+    *   stringa: carattere da controllare
+    * return: 1 se e' una cifra, 0 altrimenti
+    */
+    val = char_to_int(stringa)
+    if val < 48:
+        return 0
+    if val > 57:
+        return 0
+    return 1
+
+
+def isalpha(stringa: char) -> int:
+    /*
+    * Controlla se un carattere e' alfanumerico, componendo
+    * isnumeric/islower/isupper
+    * argomenti:
+    *   stringa: carattere da controllare
+    * return: 1 se numerico, minuscolo o maiuscolo, 0 altrimenti
+    */
+    if isnumeric(stringa):
+        return 1
+    if islower(stringa):
+        return 1
+    if isupper(stringa):
+        return 1
+    return 0
+
+
+def is_all_lower(stringa: str) -> int:
+    /*
+    * Controlla se tutti i caratteri di una stringa sono minuscoli.
+    * argomenti:
+    *   stringa: stringa da controllare
+    * return: 1 se tutti i caratteri sono minuscoli (o la stringa e'
+    *   vuota), 0 se ne trova almeno uno che non lo e'
+    */
+    max_len = strlen(stringa)
+    for idx = 0; idx < max_len; idx++:
+        if islower(stringa[idx]) == 0:
+            return 0
+    return 1
+
+
+def is_all_upper(stringa: str) -> int:
+    /*
+    * Controlla se tutti i caratteri di una stringa sono maiuscoli.
+    * argomenti:
+    *   stringa: stringa da controllare
+    * return: 1 se tutti i caratteri sono maiuscoli (o la stringa e'
+    *   vuota), 0 se ne trova almeno uno che non lo e'
+    */
+    max_len = strlen(stringa)
+    for idx = 0; idx < max_len; idx++:
+        if isupper(stringa[idx]) == 0:
+            return 0
+    return 1
+
+
+def strisalnum(stringa: str) -> int:
+    /*
+    * Controlla se tutti i caratteri di una stringa sono alfanumerici
+    * (lettere o cifre).
+    * argomenti:
+    *   stringa: stringa da controllare
+    * return: 1 se tutti i caratteri sono alfanumerici (o la stringa
+    *   e' vuota), 0 se ne trova almeno uno che non lo e'
+    */
+    max_len = strlen(stringa)
+    for idx = 0; idx < max_len; idx++:
+        if isalpha(stringa[idx]) == 0:
+            return 0
+    return 1
+
+
+def strisalalpha(stringa: str) -> int:
+    /*
+    * Controlla se tutti i caratteri di una stringa sono alfanumerici
+    * (lettere o cifre).
+    * argomenti:
+    *   stringa: stringa da controllare
+    * return: 1 se tutti i caratteri sono alfanumerici (o la stringa
+    *   e' vuota), 0 se ne trova almeno uno che non lo e'
+    */
+    len_stringa = strlen(stringa)
+    for idx = 0; idx < len_stringa; idx++:
+        if isalpha(stringa[idx]) == 0:
+            return 0
+    return 1
+
+
+def findsubstr(stringa: str, substr: str) -> int:
+    /*
+    * Cerca la prima occorrenza di una sottostringa dentro una
+    * stringa, scandendo carattere per carattere dall'inizio.
+    * argomenti:
+    *   stringa: stringa in cui cercare
+    *   substr: sottostringa da cercare
+    * return: indice della prima occorrenza, oppure -1 se non trovata
+    */
+    length_str = strlen(stringa)
+    length_sub_str = strlen(substr)
+    val = 0
+    while val <= length_str - length_sub_str:
+        num_char_match = 0
+        while num_char_match < length_sub_str:
+            if stringa[val + num_char_match] != substr[num_char_match]:
+                break
+            num_char_match++
+        if num_char_match == length_sub_str:
+            return val
+        val++
+    return -1
+
+
+def substrget(stringa: str, num_char_to_get: int) -> str:
+    /*
+    * Copia i primi num_char_to_get caratteri di una stringa in un
+    * nuovo buffer, terminato da '\0'.
+    * argomenti:
+    *   stringa: stringa sorgente
+    *   num_char_to_get: numero di caratteri da copiare
+    * return: nuova stringa allocata contenente la sottostringa
+    */
+    substring = rt_alloc_up(num_char_to_get + 1)
+    val = 0
+    while val < num_char_to_get:
+        substring[val] = stringa[val]
+        val++
+    substring[val] = '\0'
+    return substring
+
+
+def char_in_set(c: char, chars: str) -> int:
+    /*
+    * Controlla se 'c' compare da qualche parte in 'chars'.
+    * argomenti:
+    *   c: carattere da cercare
+    *   chars: insieme di caratteri in cui cercarlo
+    * return: 1 se 'c' e' presente in 'chars', 0 altrimenti
+    */
+    n = strlen(chars)
+    i = 0
+    while i < n:
+        if chars[i] == c:
+            return 1
+        i++
+    return 0
+
+
+def resolve_strip_chars(chars: str) -> str:
+    /*
+    * 'chars' vuoto ("") viene interpretato come "spazio bianco
+    * generico" (spazio, tab, newline, CR)
+    * argomenti:
+    *   chars: insieme di caratteri passato dal chiamante, "" per il
+    *     default
+    * return: 'chars' invariato se non vuoto, altrimenti " \t\n\r"
+    */
+    if strlen(chars) == 0:
+        return " \t\n\r"
+    return chars
+
+
+def lstrip(stringa: str, chars: str) -> str:
+    /*
+    * Toglie dall'inizio della stringa i caratteri che compaiono in
+    * 'chars'.
+    * argomenti:
+    *   stringa: stringa da cui togliere i caratteri iniziali
+    *   chars: insieme di caratteri da considerare "da togliere", ""
+    *     per lo spazio bianco generico
+    * return: 'stringa' spostata in avanti fino al primo carattere che
+    *   non e' in 'chars' (o fino alla fine, se lo sono tutti)
+    */
+    effective_chars = resolve_strip_chars(chars)
+    n = strlen(stringa)
+    start = 0
+    while start < n:
+        if not char_in_set(stringa[start], effective_chars):
+            break
+        start++
+    shifted = stringa + start
+    return shifted
+
+
+def rstrip(stringa: str, chars: str) -> str:
+    /*
+    * Toglie dalla fine della stringa i caratteri che compaiono in
+    * 'chars'
+    * comportamento di str.rstrip(chars) in Python: es.
+    * rstrip("aaa", "a") -> "", rstrip("banana", "an") -> "b"; 'chars'
+    * vuoto ("") vale come "spazio bianco generico"
+    * argomenti:
+    *   stringa: stringa da cui togliere i caratteri finali
+    *   chars: insieme di caratteri da considerare "da togliere", ""
+    *     per lo spazio bianco generico
+    * return: nuova stringa senza i caratteri finali presenti in
+    *   'chars' (una copia anche se non c'era nulla da togliere)
+    */
+    effective_chars = resolve_strip_chars(chars)
+    end = strlen(stringa)
+    while end > 0:
+        if not char_in_set(stringa[end - 1], effective_chars):
+            break
+        end--
+    result = substrget(stringa, end)
+    return result
+
+
+def strip(stringa: str, chars: str) -> str:
+    /*
+    * Toglie sia dall'inizio che dalla fine di 'stringa' i caratteri
+    * che compaiono in 'chars' (equivalente TryC di str.strip(chars)
+    * in Python).
+    * 'chars' vuoto ("") = (spazio/tab/newline/CR)
+    * quindi 'strip(line, "")' e' l'equivalente esatto di
+    * 'line.strip()' in Python, senza dover scrivere a mano
+    * " \t\n\r".
+    * argomenti:
+    *   stringa: stringa da ripulire
+    *   chars: insieme di caratteri da considerare "da togliere", ""
+    *     per lo spazio bianco generico
+    * return: nuova stringa senza i caratteri iniziali/finali presenti
+    *   in 'chars'
+    */
+    trimmed_left = lstrip(stringa, chars)
+    result = rstrip(trimmed_left, chars)
+    return result
+
+
+def find_num_occurence(stringa: str, substr: str) -> int:
+    /*
+    * Conta quante occorrenze non sovrapposte di substr ci sono
+    * dentro stringa.
+    * argomenti:
+    *   stringa: stringa in cui contare le occorrenze
+    *   substr: sottostringa da cercare
+    * return: numero di occorrenze trovate
+    */
+    max_iter = strlen(stringa)
+    len_occurrence = strlen(substr)
+    num_occurrences = 0
+    offset = 0
+
+    while offset < max_iter:
+        remaining = stringa + offset
+        pos_found = findsubstr(remaining, substr)
+
+        if pos_found == -1:
+            break
+
+        num_occurrences++
+        offset = offset + (pos_found + len_occurrence)
+
+    return num_occurrences
+
+
+def strcount(stringa: str, c: char) -> int:
+    /*
+    * Conta quante volte un carattere compare in una stringa.
+    * argomenti:
+    *   stringa: stringa in cui contare
+    *   c: carattere da cercare
+    * return: numero di occorrenze di c in stringa
+    */
+    len_stringa = strlen(stringa)
+    counter = 0
+    for idx = 0; idx < len_stringa; idx++:
+        if stringa[idx] == c:
+            counter++
+    return counter
+
+
+def startswith(string: str, substring: str) -> int:
+    /*
+    * Verifica se string comincia substring
+    * argomenti:
+    *   string: stringa da verificare
+    *           se inzia con determinati caratteri
+    *   substring: pattern da verificare
+    * return: 1 in caso di match, -1 altrimenti
+    */
+    size_string = strlen(string)
+    size_substring = strlen(substring)
+    if size_substring > size_string:
+        return 0
+    for idx = 0; idx < size_substring; idx++:
+        if substring[idx] != string[idx]:
+            return 0
+    return 1
+
+
+def endswith(string: str, substring: str) -> int:
+    /*
+    * Verifica se string finisce con substring
+    * argomenti:
+    *   string: stringa da verificare
+    *           se inzia con determinati caratteri
+    *   substring: pattern da verificare
+    * return: 1 in caso di match, -1 altrimenti
+    */
+    size_string = strlen(string)
+    size_substring = strlen(substring)
+    if size_substring > size_string:
+        return 0
+
+    for idx = size_string - size_substring; idx < size_string; idx++:
+        if substring[idx] != string[idx]:
+            return 0
+    return 1
+
+
+def find(stringa: str, occurr: char) -> int:
+    /*
+    * Funzione che restituisce la posizione
+    * del primo match di occurr in stringa.
+    * restituisce un valore inferiore a 0
+    * nel caso che non viene eseguito il match
+    */
+    size_stringa = strlen(stringa)
+    for idx = 0; idx < size_stringa; idx++:
+        if stringa[idx] == occurr:
+            return idx
+    return -1
+
+
+def rfind(stringa: str, occurr: char) -> int:
+    /*
+    * Funzione che restituisce la posizione
+    * dell'ultimo match di occurr in stringa.
+    * restituisce un valore inferiore a 0
+    * nel caso che non viene eseguito il match
+    */
+    size_stringa = strlen(stringa)
+    for idx = size_stringa - 1; idx >= 0; idx--:
+        if stringa[idx] == occurr:
+            return idx
+    return -1
+
+
+def get_chars_in_range(stringa: str, start_pos: int, end_pos: int) -> str:
+    sub_stringa = ""
+    for idx = start_pos; idx < end_pos; idx++:
+        sub_stringa = sub_stringa + stringa[idx]
+    return sub_stringa
+
+
+def strreadline(text: str, num_riga: int) -> str:
+    /*
+    * Funzione che preleva la riga numero 'num_riga'
+    * da 'text'
+    * argomenti:
+    *   text: testo sorgente
+    *   num_riga: il numero della riga da prelvare da text
+    * return: riga in posizione num_riga del testo
+    */
+    size_of_text = strlen(text)
+
+    current_line = 1
+    idx = 0
+
+    while idx < size_of_text:
+        if current_line == num_riga:
+            break
+
+        if text[idx] == '\n':
+            current_line++
+
+        idx++
+
+    stringa = ""
+
+    while idx < size_of_text:
+        if text[idx] == '\n':
+            break
+
+        stringa = stringa + text[idx]
+        idx++
+
+    return stringa

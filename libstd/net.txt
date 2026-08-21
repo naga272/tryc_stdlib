@@ -1,0 +1,613 @@
+#include <libstd/stdio>
+#include <libstd/macro>
+
+
+/*
+* Standard library per la gestione della rete
+* Tutte le funzioni che iniziano con sys_*
+* sono wrapper delle syscall di Linux
+*/
+
+#ifndef SYS_SOCKET
+#define SYS_SOCKET 41
+#endif
+
+#ifndef SYS_CONNECT
+#define SYS_CONNECT 42
+#endif
+
+#ifndef SYS_ACCEPT
+#define SYS_ACCEPT 43
+#endif
+
+#ifndef SYS_BIND
+#define SYS_BIND 49
+#endif
+
+#ifndef SYS_LISTEN
+#define SYS_LISTEN 50
+#endif
+
+#ifndef SYS_GETSOCKNAME
+#define SYS_GETSOCKNAME 51
+#endif
+
+#ifndef SYS_GETPEERNAME
+#define SYS_GETPEERNAME 52
+#endif
+
+#ifndef SYS_SOCKETPAIR
+#define SYS_SOCKETPAIR 53
+#endif
+
+#ifndef SYS_SETSOCKOPT
+#define SYS_SETSOCKOPT 54
+#endif
+
+#ifndef SYS_GETSOCKOPT
+#define SYS_GETSOCKOPT 55
+#endif
+
+
+// protocol (nomi standard)
+#ifndef IPPROTO_IP
+#define IPPROTO_IP       0
+#endif
+
+#ifndef IPPROTO_ICMP
+#define IPPROTO_ICMP     1
+#endif
+
+#ifndef IPPROTO_TCP
+#define IPPROTO_TCP      6
+#endif
+
+#ifndef IPPROTO_UDP
+#define IPPROTO_UDP      17
+#endif
+
+#ifndef IPPROTO_IPV6
+#define IPPROTO_IPV6     41
+#endif
+
+#ifndef IPPROTO_GRE
+#define IPPROTO_GRE      47
+#endif
+
+#ifndef IPPROTO_ESP
+#define IPPROTO_ESP      50
+#endif
+
+#ifndef IPPROTO_AH
+#define IPPROTO_AH       51
+#endif
+
+#ifndef IPPROTO_ICMPV6
+#define IPPROTO_ICMPV6   58
+#endif
+
+#ifndef IPPROTO_SCTP
+#define IPPROTO_SCTP     132
+#endif
+
+#ifndef IPPROTO_UDPLITE
+#define IPPROTO_UDPLITE  136
+#endif
+
+// se uno vuole fare velocemente
+#ifndef TCP
+#define TCP IPPROTO_TCP
+#endif
+
+// sock_type
+#ifndef SOCK_STREAM
+#define SOCK_STREAM 1       // usato per TCP
+#endif
+
+#ifndef SOCK_DGRAM
+#define SOCK_DGRAM 2        // usato per UDP
+#endif
+
+#ifndef SOCK_RAW
+#define SOCK_RAW 3          // accesso diretto ai protocolli di rete
+#endif
+
+#ifndef SOCK_RDM
+#define SOCK_RDM 4          // Reliable Datagram Message
+#endif
+
+#ifndef SOCK_SEQPACKET
+#define SOCK_SEQPACKET 5    // Pacchetti affidabili e ordinati
+#endif
+
+#ifndef SOCK_DCCP
+#define SOCK_DCCP 6         // Datagram Congestion Control Protocol
+#endif
+
+#ifndef SOCK_DGRAM
+#define SOCK_DGRAM 10       // (lo metto anche se obsoleto)
+#endif
+
+#ifndef AF_UNSPEC
+// ip_family
+#define AF_UNSPEC 0         // Non specificato 
+#endif
+
+#ifndef AF_UNIX
+#define AF_UNIX 1           // Unix Domain socket 
+#endif
+
+#ifndef AF_INET
+#define AF_INET 2           // IPv4
+#endif
+
+#ifndef AF_AX25
+#define AF_AX25 3           // AX25 
+#endif
+
+#ifndef AF_IPX
+#define AF_IPX 4            // IPX 
+#endif
+
+#ifndef AF_APPLETALK
+#define AF_APPLETALK 5      // AppleTalk
+#endif
+
+#ifndef AF_NETROM
+#define AF_NETROM 6         // NET/ROM
+#endif
+
+#ifndef AF_BRIDGE
+#define AF_BRIDGE 7         // Ethernet Bridge
+#endif
+
+#ifndef AF_INET6
+#define AF_INET6 10         // IPv6 
+#endif
+
+#ifndef AF_NETLINK
+#define AF_NETLINK 16       // Netlink
+#endif
+
+#ifndef AF_PACKET
+#define AF_PACKET 17        // Accesso a livello Ethernet
+#endif
+
+#ifndef AF_CAN
+#define AF_CAN 31           // Controller Area Network
+#endif
+
+#ifndef AF_BLUETOOTH
+#define AF_BLUETOOTH 40     // Bluetooth
+#endif
+
+/* ==== flags per setsockopt ==== */
+
+#ifndef TCP_NODELAY
+/*
+* Ordina al kernel di inviare subito ogni pacchetto senza buffering.
+* Latenza ridotta ma se usato per inviare molti pacchetti piccoli viene
+*/
+#define TCP_NODELAY 1
+#endif
+
+#ifndef SO_REUSEPORT
+/*
+* utile se si usa piu' processi/thread per accettare connessioni sullo stesso porta,
+* aumenta il parallelismo.
+*/
+#define SO_REUSEPORT 15
+#endif
+
+/*
+* Class Sockaddr_in:
+*
+* sin_fam:
+*   - sin_fam: 2 bytes
+* door:
+*   - door: 2 bytes
+* ip_addr:
+*    - first: 1 byte
+*    - second: 1 byte
+*    - third: 1 byte
+*    - fourth: 1 byte
+* padding: 8 bytes
+*/
+
+class Sockaddr_in --no-padding:
+    sin_fam_door int
+    ip_addr int
+    padding str
+
+
+def sys_socket(ip_family: int, sock_type: int, protocol: int) -> int:
+    /*
+    * Permette la creazione di un socket (wrapper della syscall socket).
+    * argomenti:
+    *   ip_family: quale famiglia di indirizzi (IPv4 o IPv6) il socket
+    *             deve usare
+    *   sock_type: il tipo di socket che si vuole (SOCK_STREAM, SOCK_DGRAM, ...)
+    *   protocol: protocollo che si vuole usare per il socket (TCP, UDP, etc...)
+    *  return: fd con valore >= 0 in caso di successo, -1 altrimenti
+    */
+    asminline(
+        mov rdi, [rbp - 44]
+        mov rsi, [rbp - 48]
+        mov rdx, [rbp - 52]
+        mov rax, SYS_SOCKET
+        syscall
+    ) endasm
+
+
+def sys_connect(sockfd: int, sockaddr: Sockaddr_in) -> int:
+    /*
+	* Nel kernel Linux, connect è l’operazione che inizializza 
+    * l’associazione attiva tra un socket locale e un endpoint remoto,
+    * impostando nella struct sock i parametri di destinazione e avviando
+    * la procedura di connessione definita dal protocollo (ad esempio il three-way handshake per TCP).
+    * Durante l’esecuzione, il socket transita in stato di connessione (TCP_SYN_SENT o equivalente) e,
+    * al completamento del collegamento, viene marcato come connesso,
+    * consentendo lo scambio bidirezionale di dati attraverso il canale stabilito.
+    */
+    asminline(
+        mov rdx, 16
+        mov rax, SYS_CONNECT
+        syscall
+    ) endasm
+
+
+def sys_bind(fd_sock: int, addr: Sockaddr_in) -> int:
+    /*
+    * lega il socket all'ip e porta usando una famiglia di addr.
+    * 
+    * argomenti:
+    *   fd_sock: fd socket da mappare
+    *   sockaddr: istanza della classe Sockaddr_in
+    * return: valore == 0 se tutto ok, != altrimenti
+    */
+    asminline(
+        mov rdx, 16
+        mov rax, SYS_BIND
+        syscall
+    ) endasm
+
+
+def sys_listen(fd_sock: int, size_queue: int) -> int:
+    /*
+    * Tramite size_queue si stabilisce quanti client
+    * si possono mettere in coda contemporaneamente
+    * (in attesa che il server li prenda con sys_accept). 
+    * argomenti:
+    *   fd_sock: fd socket server
+    *   size_queue: se 0 non c'e' limite
+    * return: valore == 0 se tutto ok, != altrimenti
+    */
+    asminline(
+        mov rax, SYS_LISTEN
+        syscall
+    ) endasm
+
+
+def sys_accept(fd_sock: int, addr: int, len_addr: int) -> int:
+    /*
+    * Il programma si mette in attesa finche' qualcuno non
+    * manda una richiesta. 
+    * argomenti:
+    *   sockfd: fd socket server
+    *   addr: ptr a classe Sockaddr_in 
+    *        (usato per ottenere maggiori informazioni sul client)
+    *   len_addr: size istanza della classe Sockaddr_in
+    * return: il fd che rappresenta l'altro end point (client)
+    * con valore >= 0, < 0 in caso di errore.
+    */
+    asminline(
+        xor rsi, rsi
+        xor rdx, rdx
+        mov rax, SYS_ACCEPT
+        syscall
+        jns .out
+        mov rax, 60
+        mov rdi, 1
+        syscall
+    ) endasm
+
+
+def socket(ip_family: int, sock_type: int, protocol: int) -> int:
+    /*
+    * wrapper della funzione sys_socket.
+    * Rispetto a sys_socket controlla lo stato della risposta.
+    * argomenti:
+    *   ip_family: quale famiglia di indirizzi (IPv4 o IPv6) il socket
+    *             deve usare
+    *   sock_type: il tipo di socket che si vuole (SOCK_STREAM, SOCK_DGRAM, ...)
+    *   protocol: protocollo che si vuole usare per il socket (TCP, UDP, etc...)
+    * return: fd con valore >= 0 in caso di successo, messaggio
+    *          di errore e uscita dal programma altrimenti
+    */
+    response = sys_socket(ip_family, sock_type, protocol)
+    if response < 0:
+        print("socket creation error! value: " + itoa(response) + "\n")
+        exit(0)
+    return response
+
+
+def bind(fd_sock: int, addr: Sockaddr_in) -> int:
+    /*
+    * wrapper della funzione sys_bind.
+    * Rispetto a sys_bind controlla lo stato della risposta.
+    * argomenti:
+    *   fd_sock: fd socket da mappare
+    *   sockaddr: istanza della classe Sockaddr_in
+    * return: valore == 0 se tutto ok, messaggio
+    *         di errore piu' uscita dal programma altrimenti
+    */
+    response = sys_bind(fd_sock, addr)
+    if response != 0:
+        print("Binding error!\n" + itoa(response) + "\n")
+        exit(0)
+    return response
+
+
+def listen(sock: int, size_queue: int) -> int:
+    /*
+    * wrapper della funzione sys_bind.
+    * Rispetto a sys_listen controlla lo stato della risposta.
+    * argomenti:
+    *   fd_sock: fd socket server
+    *   size_queue: se 0 non c'e' limite
+    * return: valore == 0 se tutto ok, messaggio
+    *         di errore piu' uscita dal programma altrimenti
+    */
+    response = sys_listen(sock, size_queue)
+    if response != 0:
+        print("listen error!\n")
+        exit(0)
+    return response
+
+
+def accept(sock: int, addr: int) -> int:
+    /*
+    * wrapper della funzione sys_bind.
+    * Rispetto a sys_accept controlla lo stato della risposta.
+    * argomenti:
+    *   fd_sock: fd socket server
+    *   size_queue: se 0 non c'e' limite
+    * return: valore > 0 se tutto ok, messaggio
+    *         di errore piu' uscita dal programma altrimenti
+    */
+    response = sys_accept(sock, addr, 16)
+    if response < 0:
+        print("errore durante l'accept\n")
+        exit(0)
+    return response
+
+
+def set_sin_fam(addr: Sockaddr_in, sin_fam: int, protocol: int) -> None:
+    /*
+    * Consente di configurare dell'oggetto Sockaddr_in
+    * sin_fam + protocollo (primi due bytes)
+    **/
+    asminline (
+        mov al, byte[rbp - 60]
+        mov ah, byte[rbp - 59]
+        mov word[rdi], ax
+    ) endasm
+
+
+def set_door(addr: Sockaddr_in, door: int) -> None:
+    /*
+    * Funzione che consente di assegnare la porta
+    * all'istanza Sockaddr_in.
+    * Se door ha un valore invalido (< 0 o > 65535)
+    * stampa un messaggio di errore e esce dal programma
+    **/
+    if door < 0 or door > 65535:
+        print("error! invalid port" + itoa(door) + "!\n")
+        exit(0)
+    
+    asminline (
+        mov bx, word[rbp - 60]
+		xchg bl, bh
+        mov word[rdi + 2], bx
+    ) endasm
+
+
+def set_sockip(addr: Sockaddr_in, first: int, second: int, third: int, fourth: int) -> None:
+    /*
+    * Procedura che permette di popolare i campi dell'istanza Sockaddr_in per l'ip 
+    *
+    * 0000 0000|0000 0000|0000 0000|0000 0000
+    *   first     second    third     fourth
+    *                   |
+    *                   v
+    *                0.0.0.0
+    * argomenti:
+    *   first: rappresenta il valore del primo byte dell'IPv4
+    *   second: rappresenta il valore del secondo byte dell'IPv4
+    *   third: rappresenta il valore del terzo byte dell'IPv4
+    *   fourth: rappresenta il valore del quarto byte dell'IPv4
+    *
+    * se i valori di first, second, third e fourth hanno un valore non compreso
+    * tra 0 e 255 viene stampato un messaggio di errore e viene eseguita 
+    * l'uscita dal programma
+    **/
+    if first > 255 or first < 0:
+        print("error! first can't be more than value 255! or lower than 0\n")
+        print("value" + itoa(first))
+        exit(1)
+    
+    if second > 255 or second < 0:
+        print("error! second can't be more than value 255! or lower than 0\n")
+        print("value" + itoa(second))
+        exit(1)
+    
+    if third > 255 or third < 0:
+        print("error! third can't be more than value 255 or lower than 0!\n")
+        print("value" + itoa(third))
+        exit(1)
+    
+    if fourth > 255 or fourth < 0:
+        print("error! fourth can't be more than value 255! or lower than 0\n")
+        print("value" + itoa(fourth))
+        exit(1)
+    
+    asminline (
+        mov rdi, [rbp - 56]
+
+        mov al, byte [rbp - 60]
+        mov [rdi + 4], al
+
+        mov al, byte [rbp - 64]
+        mov [rdi + 5], al
+
+        mov al, byte [rbp - 68]
+        mov [rdi + 6], al
+
+        mov al, byte [rbp - 72]
+        mov [rdi + 7], al
+    ) endasm
+
+
+/*
+class Linger:
+Questa struttura serve a decidere se il kernel deve chiudere il socket all'istante
+(anche se ci sono dati ancora in viaggio nella rete)
+o se deve trattenersi ad aspettare che l'invio sia completato con successo.
+campi:
+
+@l_onoff   // Interruttore: 0 = Spento, 1 = Acceso
+@l_linger  // Tempo di attesa espresso in secondi
+*/
+
+class Linger --no-padding:
+    l_onoff int
+    l_linger int
+
+
+#ifndef SOL_SOCKET1
+// Opzioni generali del socket (valide per qualsiasi tipo di socket: TCP, UDP, file locali Unix, ecc.)
+#define SOL_SOCKET1 1
+#endif
+
+#ifndef IPPROTO_IP0
+// Opzioni specifiche del livello di rete IPv4
+#define IPPROTO_IP0 0
+#endif
+
+#ifndef IPPROTO_IPV6
+// Opzioni specifiche del livello di rete IPv6
+#define IPPROTO_IPV6 41
+#endif
+
+#ifndef IPPROTO_TCP
+// Opzioni specifiche del protocollo di trasporto TCP
+#define IPPROTO_TCP 6
+#endif
+
+#ifndef IPPROTO_UDP
+// Opzioni specifiche del protocollo di trasporto UDP
+#define IPPROTO_UDP 17
+#endif
+
+#ifndef TCP_NODELAY
+/*
+* Linux aspetta a inviare un pacchetto finché non ha abbastanza dati per riempire il frame di rete.
+* Attivando questo flag (1), ogni singola scrittura viene spedita all'istante.
+* Riduce drasticamente la latenza.
+*/
+#define TCP_NODELAY 1
+#endif
+
+#ifndef TCP_MAXSEG
+/*
+* Imposta o legge il valore MSS (Maximum Segment Size),
+* ovvero la dimensione massima in byte del payload TCP di un singolo pacchetto.
+* Di solito viene negoziato in automatico,
+* ma puoi forzarlo al ribasso per evitare problemi di frammentazione IP su reti particolari.
+*/
+#define TCP_MAXSEG 2
+#endif
+
+#ifndef TCP_CORK
+/*
+* Dice al kernel di non accumulare piccoli pacchetti, ma di aspettare finché il buffer non è stracolmo
+* (al limite della dimensione MSS).
+* Se unisci più scritture piccole,
+* viaggeranno in un unico blocco gigante ottimizzando la banda di rete.
+*/
+#define TCP_CORK 3
+#endif
+
+#ifndef TCP_KEEPIDLE
+/*
+* Specifica il tempo di inattività (in secondi) prima che il kernel inizi a inviare i primi pacchetti
+* "esplorativi" per verificare se l'altro computer è ancora vivo.
+* Il default di Linux è molto alto (7200 secondi / 2 ore).
+*/
+#define TCP_KEEPIDLE 4
+#endif
+
+#ifndef TCP_KEEPINTVL
+/*
+* Specifica l'intervallo di tempo (in secondi) tra un pacchetto di controllo e il successivo,
+* nel caso in cui l'altro capo non stia rispondendo.
+*/
+#define TCP_KEEPINTVL 5
+#endif
+
+#ifndef TCP_KEEPCNT
+/*
+* Specifica il numero massimo di pacchetti di Keep-Alive consecutivi che possono andare persi
+* prima che il kernel dichiari la connessione ufficialmente "morta" e chiuda il socket restituendo un errore.
+*/
+#define TCP_KEEPCNT 6
+#endif
+
+#ifndef TCP_QUICKACK
+/*
+* Forza il kernel a inviare immediatamente i pacchetti di conferma (ACK) di ricezione dei dati.
+* Normalmente Linux ritarda leggermente gli ACK sperando di poterli accorpare ai dati di risposta del tuo programma.
+* Utile se vuoi massimizzare la reattività di ricezione.
+*/
+#define TCP_QUICKACK 12
+#endif
+
+#ifndef TCP_USER_TIMEOUT
+/*
+* Specifica il tempo massimo (in millisecondi) in cui i dati trasmessi possono
+* rimanere non confermati (senza ACK) prima che il kernel
+* forzi la chiusura della connessione.
+* E' molto utile per rilevare cavi di rete staccati o
+* crash improvvisi del server in pochissimi secondi.
+*/
+#define TCP_USER_TIMEOUT 18
+#endif
+
+#ifndef TCP_DEFER_ACCEPT
+
+/*
+* Ottimizzazione per i server web.
+* Dice al kernel di non svegliare il processo tramite la syscall accept() quando un client si connette,
+* ma di aspettare finché il client non invia anche il primo pacchetto reale di dati
+* (es. la richiesta HTTP GET). Riduce i cambi di contesto inutili.
+*/
+#define TCP_DEFER_ACCEPT 9
+#endif
+
+
+def sys_getsockopt(sockfd: int, level: int, optname: int, optval: Linger) -> int:
+    val = 8    
+    asminline (
+        lea r8, dword[rbp - 72]
+        mov rax, SYS_GETSOCKOPT
+        syscall
+    ) endasm
+
+
+def sys_setsockopt(sockfd: int, level: int, optname: int, optval: &int) -> int:
+    asminline (
+        lea r10, [rbp - 56]
+        mov r8, 4
+        mov rax, SYS_SETSOCKOPT
+        syscall
+    ) endasm

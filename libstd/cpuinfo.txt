@@ -1,0 +1,694 @@
+
+/*
+*   Standard library per ottenere informazioni sulla CPU, tramite
+*   l'istruzione CPUID (identificazione/funzionalita' hardware) e la
+*   syscall sched_getaffinity (quante CPU logiche sono disponibili al
+*   processo corrente).
+*   Non viene usata da nessuna parte l'heap memory
+*/
+
+#ifndef SYS_SCHED_GETAFFINITY
+#define SYS_SCHED_GETAFFINITY 204
+#endif
+
+/* CPUID leaf usati dalla libreria */
+
+#ifndef CPUID_LEAF_VENDOR
+#define CPUID_LEAF_VENDOR 0
+#endif
+
+#ifndef CPUID_LEAF_FEATURES
+#define CPUID_LEAF_FEATURES 1
+#endif
+
+#ifndef CPUID_LEAF_EXT_FEATURES
+#define CPUID_LEAF_EXT_FEATURES 7
+#endif
+
+#ifndef CPUID_LEAF_EXT_MAX
+#define CPUID_LEAF_EXT_MAX 2147483648   // 0x80000000
+#endif
+
+#ifndef CPUID_LEAF_BRAND_1
+#define CPUID_LEAF_BRAND_1 2147483650   // 0x80000002
+#endif
+
+#ifndef CPUID_LEAF_BRAND_2
+#define CPUID_LEAF_BRAND_2 2147483651   // 0x80000003
+#endif
+
+#ifndef CPUID_LEAF_BRAND_3
+#define CPUID_LEAF_BRAND_3 2147483652   // 0x80000004
+#endif
+
+#ifndef CPUID_LEAF_ADDRESS_SIZES
+#define CPUID_LEAF_ADDRESS_SIZES 2147483656   // 0x80000008
+#endif
+
+
+/* CPUID leaf 1, EDX (baseline di x86-64) */
+#ifndef CPUID_EDX_FPU
+// 1 << 0
+#define CPUID_EDX_FPU 1
+#endif
+
+#ifndef CPUID_EDX_MMX
+// 1 << 23
+#define CPUID_EDX_MMX 8388608
+#endif
+
+#ifndef CPUID_EDX_SSE
+// 1 << 25
+#define CPUID_EDX_SSE 33554432
+#endif
+
+#ifndef CPUID_EDX_SSE2
+// 1 << 26
+#define CPUID_EDX_SSE2 67108864
+#endif
+
+#ifndef CPUID_EDX_HTT
+// 1 << 28 (hyper-threading supportato, non significa che e' attivo)
+#define CPUID_EDX_HTT 268435456
+#endif
+
+/* CPUID leaf 1, ECX */
+#ifndef CPUID_ECX_SSE3
+// 1 << 0
+#define CPUID_ECX_SSE3 1
+#endif
+
+#ifndef CPUID_ECX_SSSE3
+// 1 << 9
+#define CPUID_ECX_SSSE3 512
+#endif
+
+#ifndef CPUID_ECX_FMA
+// 1 << 12
+#define CPUID_ECX_FMA 4096
+#endif
+
+#ifndef CPUID_ECX_SSE41
+// 1 << 19
+#define CPUID_ECX_SSE41 524288
+#endif
+
+#ifndef CPUID_ECX_SSE42
+// 1 << 20
+#define CPUID_ECX_SSE42 1048576
+#endif
+
+#ifndef CPUID_ECX_POPCNT
+// 1 << 23
+#define CPUID_ECX_POPCNT 8388608
+#endif
+
+#ifndef CPUID_ECX_AES
+// 1 << 25
+#define CPUID_ECX_AES 33554432
+#endif
+
+#ifndef CPUID_ECX_AVX
+// 1 << 28
+#define CPUID_ECX_AVX 268435456
+#endif
+
+#ifndef CPUID_ECX_RDRAND
+// 1 << 30
+#define CPUID_ECX_RDRAND 1073741824
+#endif
+
+#ifndef CPUID_ECX_HYPERVISOR
+// 1 << 31 (il processo gira dentro una VM)
+#define CPUID_ECX_HYPERVISOR  2147483648
+#endif
+
+/* CPUID leaf 7, subleaf 0, EBX */
+#ifndef CPUID_LEAF7_EBX_AVX2
+// 1 << 5
+#define CPUID_LEAF7_EBX_AVX2 32
+#endif
+
+#ifndef CPUID_LEAF7_EBX_AVX512F
+// 1 << 16
+#define CPUID_LEAF7_EBX_AVX512F 65536
+#endif
+
+
+class CpuidResult --no-padding:
+    eax int
+    ebx int
+    ecx int
+    edx int
+
+
+def cpuid(leaf: int, subleaf: int, out: CpuidResult) -> None:
+    /*
+    * Esegue l'istruzione CPUID(leaf, subleaf) e scrive i 4 registri
+    * risultato (EAX, EBX, ECX, EDX) nei campi di out
+    * argomenti:
+    *   leaf: valore da caricare in EAX prima di CPUID
+    *   subleaf: valore da caricare in ECX prima di CPUID (ignorato
+    *     dalla maggior parte dei leaf - passa 0 se non sai se serve)
+    *   out: struttura CpuidResult in cui scrivere EAX/EBX/ECX/EDX
+    * return: nessuno (procedura)
+    */
+    asminline(
+        ; callee-saved
+        push rbx
+        mov r8, rdx     ; out* (rdx verra' distrutto da cpuid)
+        mov eax, edi    ; leaf
+        mov ecx, esi    ; subleaf
+        cpuid
+        mov [r8], eax
+        mov [r8 + 4], ebx
+        mov [r8 + 8], ecx
+        mov [r8 + 12], edx
+        pop rbx
+    ) endasm
+
+
+def cpu_vendor() -> str:
+    /*
+    * Stringa di 12 caratteri che identifica il produttore della CPU
+    * (es. "GenuineIntel", "AuthenticAMD") CPUID leaf 0.
+    * return: stringa di 12 caratteri
+    */
+    asminline(
+        push rbx
+        mov rdi, 13     ; + terminatore
+        call rt_alloc
+        mov r8, rax
+
+        mov eax, CPUID_LEAF_VENDOR
+        xor ecx, ecx
+        cpuid
+
+        mov [r8], ebx
+        mov [r8 + 4], edx
+        mov [r8 + 8], ecx
+
+        mov rax, r8
+
+        push rax
+        mov rdi, rax
+        mov rsi, 1
+        call rt_promote
+        pop rax
+
+        pop rbx
+    ) endasm
+
+
+def cpu_brand() -> str:
+    /*
+    * Stringa descrittiva completa della CPU, es.
+    * "Intel(R) Core(TM) i7-9700K CPU @ 3.60GHz"
+    * CPUID leaf 0x80000002/3/4 (48 byte totali, 16 per leaf).
+    * NB: puo' contenere spazi finali di padding
+    */
+    asminline(
+        push rbx
+        mov rdi, 49              ; 48 caratteri + terminatore
+        call rt_alloc
+        mov r8, rax
+
+        mov eax, CPUID_LEAF_BRAND_1
+        xor ecx, ecx
+        cpuid
+        mov [r8], eax
+        mov [r8 + 4], ebx
+        mov [r8 + 8], ecx
+        mov [r8 + 12], edx
+
+        mov eax, CPUID_LEAF_BRAND_2
+        xor ecx, ecx
+        cpuid
+        mov [r8 + 16], eax
+        mov [r8 + 20], ebx
+        mov [r8 + 24], ecx
+        mov [r8 + 28], edx
+
+        mov eax, CPUID_LEAF_BRAND_3
+        xor ecx, ecx
+        cpuid
+        mov [r8 + 32], eax
+        mov [r8 + 36], ebx
+        mov [r8 + 40], ecx
+        mov [r8 + 44], edx
+
+        mov rax, r8
+
+        push rax
+        mov rdi, rax
+        mov rsi, 1
+        call rt_promote
+        pop rax
+
+        pop rbx
+    ) endasm
+
+
+def cpu_family() -> int:
+    /*
+    * extended Family della CPU (CPUID leaf 1, EAX)
+    * return: family della CPU
+    */
+    asminline(
+        push rbx
+        mov eax, CPUID_LEAF_FEATURES
+        xor ecx, ecx
+        cpuid
+
+        mov r8d, eax
+        shr r8d, 8
+        and r8d, 0xF              ; family di base
+
+        cmp r8d, 0xF
+        jne .done
+            mov r9d, eax
+            shr r9d, 20
+            and r9d, 0xFF          ; extended family
+            add r8d, r9d
+        .done:
+
+        mov rax, r8
+        pop rbx
+    ) endasm
+
+
+def cpu_model() -> int:
+    /*
+    * extended model della CPU (CPUID leaf 1, EAX)
+    * return: model della CPU
+    */
+    asminline(
+        push rbx
+        mov eax, CPUID_LEAF_FEATURES
+        xor ecx, ecx
+        cpuid
+
+        mov r8d, eax
+        shr r8d, 8
+        and r8d, 0xF               ; family di base (decide se serve extended model)
+
+        mov r9d, eax
+        shr r9d, 4
+        and r9d, 0xF                ; model di base
+
+        cmp r8d, 6
+        je .use_extended
+        cmp r8d, 0xF
+        je .use_extended
+        jmp .done
+
+        .use_extended:
+            mov r10d, eax
+            shr r10d, 16
+            and r10d, 0xF             ; extended model
+            shl r10d, 4
+            or r9d, r10d
+        .done:
+
+        mov rax, r9
+        pop rbx
+    ) endasm
+
+
+def cpu_stepping() -> int:
+    /*
+    * Stepping della CPU (CPUID leaf 1, EAX bit 3:0)
+    * return: stepping della CPU
+    */
+    asminline(
+        push rbx
+        mov eax, CPUID_LEAF_FEATURES
+        xor ecx, ecx
+        cpuid
+        mov r8d, eax
+        and r8d, 0xF
+        mov rax, r8
+        pop rbx
+    ) endasm
+
+
+def cpu_cache_line_size() -> int:
+    /*
+    * Numero di bytes di una linea di cache
+    * (CPUID leaf 1, EBX bit 15:8, espressa nel registro in unita' da 8 byte).
+    * return: dimensione di una linea di cache in byte
+    */
+    asminline(
+        push rbx
+        mov eax, CPUID_LEAF_FEATURES
+        xor ecx, ecx
+        cpuid
+        mov r8d, ebx
+        shr r8d, 8
+        and r8d, 0xFF
+        shl r8d, 3      ; * 8
+        mov rax, r8
+        pop rbx
+    ) endasm
+
+
+def physical_address_bits() -> int:
+    /*
+    * Numero di bit usati dalla CPU per indirizzare la memoria fisica
+    * (CPUID leaf 0x80000008, EAX bit 7:0) (determina quanta RAM la
+    * CPU puo' indirizzare in teoria (2^n byte)).
+    * return: numero di bit di indirizzamento fisico
+    */
+    asminline(
+        push rbx
+        mov eax, CPUID_LEAF_ADDRESS_SIZES
+        xor ecx, ecx
+        cpuid
+        mov r8d, eax
+        and r8d, 0xFF
+        mov rax, r8
+        pop rbx
+    ) endasm
+
+
+def virtual_address_bits() -> int:
+    /*
+    * Numero di bit usati dalla CPU per indirizzare la memoria
+    * virtuale (CPUID leaf 0x80000008, EAX bit 15:8)
+    * return: numero di bit di indirizzamento virtuale
+    */
+    asminline(
+        push rbx
+        mov eax, CPUID_LEAF_ADDRESS_SIZES
+        xor ecx, ecx
+        cpuid
+        mov r8d, eax
+        shr r8d, 8
+        and r8d, 0xFF
+        mov rax, r8
+        pop rbx
+    ) endasm
+
+
+def logical_cpu_count() -> int:
+    /*
+    * return: numero di CPU logiche disponibili a questo processo
+    */
+    asminline(
+        push rbx
+        mov rdi, 128
+        call rt_alloc
+        mov rbx, rax
+        ; pid = 0 -> processo corrente
+        xor rdi, rdi
+        ; cpusetsize
+        mov rsi, 128
+        ; mask*
+        mov rdx, rbx
+        mov rax, SYS_SCHED_GETAFFINITY
+        syscall
+
+        ; conta i bit a 1 nei 128 byte del buffer
+        xor r8, r8      ; r8 = total counter
+        xor r9, r9      ; r9 = idx
+
+        .byte_loop:
+            cmp r9, 128
+            jge .done
+
+            movzx r10, byte [rbx + r9]
+            .count_bits:
+                test r10, r10
+                jz .next_byte
+                mov r11, r10
+                dec r11
+                and r10, r11
+                inc r8
+                jmp .count_bits
+            .next_byte:
+            inc r9
+            jmp .byte_loop
+
+        .done:
+        mov rax, r8
+        pop rbx
+    ) endasm
+
+
+def has_sse2() -> int:
+    /*
+    * Se la CPU supporta SSE2 (CPUID leaf 1, EDX bit 26)
+    * return: 1 se supportato, 0 altrimenti
+    */
+    asminline(
+        push rbx
+        mov eax, CPUID_LEAF_FEATURES
+        xor ecx, ecx
+        cpuid
+        and edx, CPUID_EDX_SSE2
+        cmp edx, 0
+        setne al
+        movzx rax, al
+        pop rbx
+    ) endasm
+
+
+def has_sse3() -> int:
+    /*
+    * Se la CPU supporta SSE3 (CPUID leaf 1, ECX bit 0).
+    * return: 1 se supportato, 0 altrimenti
+    */
+    asminline(
+        push rbx
+        mov eax, CPUID_LEAF_FEATURES
+        xor ecx, ecx
+        cpuid
+        and ecx, CPUID_ECX_SSE3
+        cmp ecx, 0
+        setne al
+        movzx rax, al
+        pop rbx
+    ) endasm
+
+
+def has_ssse3() -> int:
+    /*
+    * Se la CPU supporta SSSE3 (CPUID leaf 1, ECX bit 9).
+    * return: 1 se supportato, 0 altrimenti
+    */
+    asminline(
+        push rbx
+        mov eax, CPUID_LEAF_FEATURES
+        xor ecx, ecx
+        cpuid
+        and ecx, CPUID_ECX_SSSE3
+        cmp ecx, 0
+        setne al
+        movzx rax, al
+        pop rbx
+    ) endasm
+
+
+def has_sse41() -> int:
+    /*
+    * Se la CPU supporta SSE4.1 (CPUID leaf 1, ECX bit 19).
+    * return: 1 se supportato, 0 altrimenti
+    */
+    asminline(
+        push rbx
+        mov eax, CPUID_LEAF_FEATURES
+        xor ecx, ecx
+        cpuid
+        and ecx, CPUID_ECX_SSE41
+        cmp ecx, 0
+        setne al
+        movzx rax, al
+        pop rbx
+    ) endasm
+
+
+def has_sse42() -> int:
+    /*
+    * Se la CPU supporta SSE4.2 (CPUID leaf 1, ECX bit 20).
+    * return: 1 se supportato, 0 altrimenti
+    */
+    asminline(
+        push rbx
+        mov eax, CPUID_LEAF_FEATURES
+        xor ecx, ecx
+        cpuid
+        and ecx, CPUID_ECX_SSE42
+        cmp ecx, 0
+        setne al
+        movzx rax, al
+        pop rbx
+    ) endasm
+
+
+def has_avx() -> int:
+    /*
+    * Se la CPU supporta AVX (CPUID leaf 1, ECX bit 28).
+    * NB: anche se la cpu lo supporta non e' detto che l'os
+    * lo tiene abilitato.
+    * return: 1 se supportato, 0 altrimenti
+    */
+    asminline(
+        push rbx
+        mov eax, CPUID_LEAF_FEATURES
+        xor ecx, ecx
+        cpuid
+        and ecx, CPUID_ECX_AVX
+        cmp ecx, 0
+        setne al
+        movzx rax, al
+        pop rbx
+    ) endasm
+
+
+def has_avx2() -> int:
+    /*
+    * Se la CPU supporta AVX2 (CPUID leaf 7, subleaf 0, EBX bit 5) -
+    * NB: anche se la cpu lo supporta non e' detto che l'os
+    * lo tiene abilitato.
+    * return: 1 se supportato, 0 altrimenti
+    */
+    asminline(
+        push rbx
+        mov eax, CPUID_LEAF_EXT_FEATURES
+        xor ecx, ecx
+        cpuid
+        and ebx, CPUID_LEAF7_EBX_AVX2
+        cmp ebx, 0
+        setne al
+        movzx rax, al
+        pop rbx
+    ) endasm
+
+
+def has_avx512f() -> int:
+    /*
+    * Se la CPU supporta AVX-512 Foundation (CPUID leaf 7, subleaf
+    * 0, EBX bit 16)
+    * return: 1 se supportato, 0 altrimenti
+    */
+    asminline(
+        push rbx
+        mov eax, CPUID_LEAF_EXT_FEATURES
+        xor ecx, ecx
+        cpuid
+        and ebx, CPUID_LEAF7_EBX_AVX512F
+        cmp ebx, 0
+        setne al
+        movzx rax, al
+        pop rbx
+    ) endasm
+
+
+def has_aes() -> int:
+    /*
+    * Se la CPU supporta AES-NI (CPUID leaf 1, ECX bit 25).
+    * return: 1 se supportato, 0 altrimenti
+    */
+    asminline(
+        push rbx
+        mov eax, CPUID_LEAF_FEATURES
+        xor ecx, ecx
+        cpuid
+        and ecx, CPUID_ECX_AES
+        cmp ecx, 0
+        setne al
+        movzx rax, al
+        pop rbx
+    ) endasm
+
+
+def has_rdrand() -> int:
+    /*
+    * Se la CPU supporta l'istruzione RDRAND
+    * (CPUID leaf 1, ECX bit 30).
+    * return: 1 se supportato, 0 altrimenti
+    */
+    asminline(
+        push rbx
+        mov eax, CPUID_LEAF_FEATURES
+        xor ecx, ecx
+        cpuid
+        and ecx, CPUID_ECX_RDRAND
+        cmp ecx, 0
+        setne al
+        movzx rax, al
+        pop rbx
+    ) endasm
+
+
+def has_popcnt() -> int:
+    /*
+    * Se la CPU supporta l'istruzione POPCNT
+    * (CPUID leaf 1, ECX bit 23).
+    * return: 1 se supportato, 0 altrimenti
+    */
+    asminline(
+        push rbx
+        mov eax, CPUID_LEAF_FEATURES
+        xor ecx, ecx
+        cpuid
+        and ecx, CPUID_ECX_POPCNT
+        cmp ecx, 0
+        setne al
+        movzx rax, al
+        pop rbx
+    ) endasm
+
+
+def has_fma() -> int:
+    /*
+    * Se la CPU supporta FMA3 (CPUID leaf 1, ECX bit 12).
+    * return: 1 se supportato, 0 altrimenti
+    */
+    asminline(
+        push rbx
+        mov eax, CPUID_LEAF_FEATURES
+        xor ecx, ecx
+        cpuid
+        and ecx, CPUID_ECX_FMA
+        cmp ecx, 0
+        setne al
+        movzx rax, al
+        pop rbx
+    ) endasm
+
+
+def has_mmx() -> int:
+    /*
+    * Se la CPU supporta MMX (CPUID leaf 1, EDX bit 23)
+    * return: 1 se supportato, 0 altrimenti
+    */
+    asminline(
+        push rbx
+        mov eax, CPUID_LEAF_FEATURES
+        xor ecx, ecx
+        cpuid
+        and edx, CPUID_EDX_MMX
+        cmp edx, 0
+        setne al
+        movzx rax, al
+        pop rbx
+    ) endasm
+
+
+def is_hypervisor() -> int:
+    /*
+    * CPUID leaf 1, ECX bit 31
+    * return: 1 se in esecuzione in una VM, 0 altrimenti
+    */
+    asminline(
+        push rbx
+        mov eax, CPUID_LEAF_FEATURES
+        xor ecx, ecx
+        cpuid
+        and ecx, CPUID_ECX_HYPERVISOR
+        cmp ecx, 0
+        setne al
+        movzx rax, al
+        pop rbx
+    ) endasm

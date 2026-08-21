@@ -1,0 +1,7 @@
+#include <libstd/stdio>
+
+
+/*
+* Programma che stampa a schermo la scritta "Hello World".
+*/
+print("Hello world")

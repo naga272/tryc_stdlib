@@ -1,0 +1,165 @@
+#include <libstd/macro>
+#include <libstd/string>
+
+
+#define SYS_READ 0
+#define SYS_WRITE 1
+#define INPUT_BUFFER_SIZE 4096
+
+
+def sys_read(fd: int, start_offs: str, length: long) -> int:
+    /*
+    * Legge byte da un file descriptor (wrapper della
+    * syscall read).
+    * argomenti:
+    *   fd: file descriptor da cui leggere
+    *   start_offs: buffer in cui scrivere i byte letti
+    *   length: numero massimo di byte da leggere
+    * return: numero di byte effettivamente letti, o un valore
+    *   negativo in caso di errore
+    */
+    asminline(
+        mov rax, SYS_READ
+        syscall
+    ) endasm
+
+
+class InputBuffer --no-padding:
+    buf str
+    len int
+    pos int
+    eof int
+
+
+def input_buffer_new() -> InputBuffer:
+    /*
+    * Crea un nuovo buffer di lettura bufferizzata da standard input
+    * (4096 byte), inizialmente vuoto.
+    * Si possono creare piu' buffer 
+    * indipendenti se serve leggere da piu' sorgenti bufferizzate
+    * contemporaneamente.
+    * argomenti: nessuno
+    * return: handle del buffer appena creato, da passare a
+    *   input_buffered/input_line
+    */
+    ib = new InputBuffer()
+    ib.buf = rt_alloc_up(INPUT_BUFFER_SIZE)
+    ib.len = 0
+    ib.pos = 0
+    ib.eof = 0
+    return ib
+
+
+def input_buffered(ib: InputBuffer, fd: int) -> char:
+    /*
+    * Legge il prossimo carattere da standard input.
+    * Fa una vera syscall solo quando il buffer e' esaurito,
+    * leggendo fino a INPUT_BUFFER_SIZE byte in un colpo
+    * invece di uno alla volta (le syscall sono dispendiose)
+    * argomenti:
+    *   ib: buffer creato con input_buffer_new
+    * return: il carattere letto, oppure '\0' se non c'e' piu' nulla
+    *   da leggere (EOF o errore).
+    *   Imposta anche ib.eof = 1 (vedi at_eof),
+    *   cosi' readline()/input() possono
+    *   restituire "" per una riga vuota
+    */
+    if ib.pos >= ib.len:
+        n = sys_read(fd, ib.buf, INPUT_BUFFER_SIZE)
+
+        if n <= 0:
+            ib.eof = 1
+            return '\0'
+
+        ib.len = n
+        ib.pos = 0
+
+    c = ib.buf[ib.pos]
+    ib.pos = ib.pos + 1
+    return c
+
+
+def at_eof(ib: InputBuffer) -> int:
+    /*
+    * Indica se l'ultimo lettura da 'ib' ha incontrato la fine
+    * dello stream sottostante (o un errore).
+    * argomenti:
+    *   ib: buffer creato con input_buffer_new
+    * return: 1 se l'ultima lettura ha incontrato EOF/errore,
+    *   0 se erano presenti altri dati
+    */
+    return ib.eof
+
+
+def input(ib: InputBuffer) -> str:
+    /*
+    * Legge una riga intera da standard input (fino a '\n' o EOF),
+    * costruendola carattere per carattere con input_buffered
+    * argomenti:
+    *   ib: buffer creato con input_buffer_new
+    * return: la riga letta senza il '\n' finale terminata da '\0'.
+    */
+    line = rt_alloc_up(INPUT_BUFFER_SIZE)
+    i = 0
+    while i < INPUT_BUFFER_SIZE - 1:
+        c = input_buffered(ib, 0)
+        if c == '\0':
+            break
+        if c == '\n':
+            break
+        line[i] = c
+        i++
+    if i > 0 and line[i - 1] == '\r':
+        i--
+    line[i] = '\0'
+    return line
+
+
+def readline(ib: InputBuffer, fd: int) -> str:
+    /*
+    * Legge una riga intera da un file descriptor (fino a '\n' o EOF),
+    * costruendola carattere per carattere con input_buffered
+    */
+    line = rt_alloc_up(INPUT_BUFFER_SIZE)
+    i = 0
+    while i < INPUT_BUFFER_SIZE - 1:
+        c = input_buffered(ib, fd)
+        if c == '\0':
+            break
+        if c == '\n':
+            break
+        line[i] = c
+        i++
+    if i > 0 and line[i - 1] == '\r':
+        i--
+    line[i] = '\0'
+    return line
+
+
+def fprint(fd: int, stringa: str) -> int:
+    /*
+    * Scrive una stringa su un file descriptor qualunque
+    * argomenti:
+    *   fd: file descriptor su cui scrivere
+    *   stringa: stringa da scrivere, terminata da '\0'
+    * return: numero di byte effettivamente scritti
+    */
+    len_str = strlen(stringa)
+    num_char_printed = sys_write(fd, stringa, len_str)
+    return num_char_printed
+
+
+def freadc(fd: int) -> int:
+    /*
+    * Legge un singolo byte da un file descriptor qualunque e ne
+    * restituisce il valore.
+    * argomenti:
+    *   fd: file descriptor da cui leggere
+    * return: il byte letto (0-255), oppure -1 se non c'e' piu' nulla
+    *   da leggere (EOF) o in caso di errore
+    */
+    buf = rt_alloc_up(1)
+    n = sys_read(fd, buf, 1)
+    if n <= 0:
+        return -1
+    return char_to_int(buf[0])

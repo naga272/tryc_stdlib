@@ -1,0 +1,8 @@
+#include <libstd/stdio>
+
+x = 5
+
+p = &x
+y = p as long
+z = p as ptr int
+w = p as str

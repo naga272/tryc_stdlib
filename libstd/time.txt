@@ -1,0 +1,302 @@
+
+#define SYS_CLOCK_SETTIME 227
+#define SYS_CLOCK_GETTIME 228
+#define SYS_CLOCK_GETRES 229
+#define SYS_CLOCK_NANOSLEEP 230
+
+
+#ifndef CLOCK_REALTIME
+/*
+* Esprime i secondi passati dall' 1 Gennaio 1970 (Epoch Unix)
+*/
+#define CLOCK_REALTIME 0
+#endif
+
+#ifndef CLOCK_MONOTONIC
+/*
+* Orologio che garantisce di andare sempre e solo in avanti a
+* velocita' costante.
+* Parte dal momento del boot del sistema e
+* si blocca quando il PC va in standby.
+*/
+#define CLOCK_MONOTONIC 1
+#endif
+
+#ifndef CLOCK_MONOTONIC_RAW
+/*
+* Non viene influenzato o manipolato dagli aggiustamenti
+* di frequenza del demone NTP.
+*/
+#define CLOCK_MONOTONIC_RAW 4
+#endif
+
+#ifndef CLOCK_BOOTTIME
+/*
+* Include il tempo in cui il sistema e' rimasto sospeso/addormentato (suspend/sleep).
+*/
+#define CLOCK_BOOTTIME 7
+#endif
+
+#ifndef CLOCK_PROCESS_CPUTIME_ID
+/*
+* Misura il tempo di CPU consumato dal processo attuale
+* (somma l'attivita' di tutti i suoi thread).
+* Se il processo viene messo in pausa dal sistema operativo
+* il contatore si ferma.
+*/
+#define CLOCK_PROCESS_CPUTIME_ID 2
+#endif
+
+#ifndef CLOCK_THREAD_CPUTIME_ID
+/*
+* Misura il tempo di CPU consumato esclusivamente dal singolo thread
+* che ha effettuato la chiamata.
+*/
+#define CLOCK_THREAD_CPUTIME_ID 3
+#endif
+
+#ifndef TIMER_RELATIVE
+/* 
+* flag per sys_clock_nanosleep: richiesta relativa, dorme per
+* 'request' unita' di tempo a partire da ora 
+* (il caso comune, vedi sleep_ms)
+*/
+#define TIMER_RELATIVE 0
+#endif
+
+#ifndef TIMER_ABSTIME
+/*
+* flag per sys_clock_nanosleep: richiesta ASSOLUTA, dorme FINO
+* all'istante 'request' sull'orologio 'which_clock',
+* non per una durata
+*/
+#define TIMER_ABSTIME 1
+#endif
+
+
+class Timeval --no-padding:
+    tv_sec long
+    tv_usec long
+
+
+/* 
+* docs:
+* struct timespec (Linux x86-64): 16 byte totali, due campi da 8 byte
+* ciascuno (time_t/long, non int).
+*
+* time_t tv_sec	    whole seconds (valid values are >= 0)
+* long long tv_nsec	nanoseconds (valid values are [0, 999999999])
+*/
+
+class Timespec --no-padding:
+    tv_sec  long
+    tv_nsec long
+
+
+def sys_clock_settime(which_clock: int, tp: Timespec) -> None:
+    /*
+    * Imposta l'orologio di sistema indicato (wrapper diretto della
+    * syscall clock_settime).
+    * NB: Richiede privilegi sufficienti.
+    * argomenti:
+    *   which_clock: identificatore del clock (es. CLOCK_REALTIME)
+    *   tp: struttura Timespec con il nuovo valore da impostare
+    */
+    asminline(
+        mov rax, SYS_CLOCK_SETTIME
+        syscall
+    ) endasm
+
+
+def sys_clock_gettime(which_clock: int, tp: Timespec) -> None:
+    /*
+    * Legge il valore corrente dell'orologio indicato
+    * (wrapper diretto della syscall clock_gettime).
+    * argomenti:
+    *   which_clock: identificatore del clock (es. CLOCK_REALTIME,
+    *     CLOCK_MONOTONIC)
+    *   tp: struttura Timespec in cui scrivere il valore letto
+    */
+    asminline(
+        mov rax, SYS_CLOCK_GETTIME
+        syscall
+    ) endasm
+
+
+def sys_clock_getres(which_clock: int, tp: Timespec) -> None:
+    /*
+    * Legge la risoluzione (precisione) dell'orologio indicato
+    * (wrapper diretto della syscall clock_getres).
+    * argomenti:
+    *   which_clock: identificatore del clock
+    *   tp: struttura Timespec in cui scrivere la risoluzione
+    */
+    asminline(
+        mov rax, SYS_CLOCK_GETRES
+        syscall
+    ) endasm
+
+
+def sys_clock_nanosleep(which_clock: int, flags: int, request: Timespec, remain: Timespec) -> int:
+    /*
+    * Sospende l'esecuzione del processo per l'intervallo indicato
+    * (wrapper diretto della syscall clock_nanosleep)
+    * argomenti:
+    *   which_clock: identificatore del clock di riferimento
+    *   flags: TIMER_RELATIVE (dorme per 'request' unita' di tempo) o
+    *     TIMER_ABSTIME (dorme fino all'istante assoluto 'request')
+    *   request: durata (o istante, con TIMER_ABSTIME) del sonno
+    *   remain: se il sonno viene interrotto da un segnale, il kernel
+    *     ci scrive quanto tempo restava (deve comunque puntare a un
+    *     Timespec valido, anche se non interessa il valore)
+    * return: 0 in caso di successo, un valore negativo in caso di
+    *   errore o interruzione (es. -EINTR)
+    */
+    asminline(
+        mov r10, rcx
+        push rcx
+        mov rax, SYS_CLOCK_NANOSLEEP
+        syscall
+        pop rcx
+    ) endasm
+
+
+def now(tp: Timespec) -> None:
+    /*
+    * Scrive in 'tp' l'ora corrente "da calendario" 
+    * (secondi dall' Epoch Unix + nanosecondi) CLOCK_REALTIME,
+    * quindi influenzata dall'orologio di sistema
+    * (NTP, modifica manuale, etc...)
+    * argomenti:
+    *   tp: struttura Timespec in cui scrivere l'istante corrente
+    */
+    sys_clock_gettime(CLOCK_REALTIME, tp)
+
+
+def monotonic(tp: Timespec) -> None:
+    /*
+    * Scrive in 'tp' il valore corrente dell'orologio monotono
+    * (CLOCK_MONOTONIC) parte da un punto arbitrario andando
+    * sempre e solo in avanti a velocita' costante
+    * argomenti:
+    *   tp: struttura Timespec in cui scrivere l'istante corrente
+    * return: nessuno (procedura)
+    */
+    sys_clock_gettime(CLOCK_MONOTONIC, tp)
+
+
+def timestamp() -> long:
+    /*
+    * Restituisce l'ora corrente "da calendario" come numero di
+    * secondi trascorsi dall' 1 Gennaio 1970 (Unix Epoch).
+    * return: secondi trascorsi dall'Epoch Unix
+    */
+    tp = new Timespec()
+    now(tp)
+    return tp.tv_sec
+
+
+def timestamp_ms() -> long:
+    /*
+    * Come timestamp() ma con precisione al millisecondo invece che
+    * al secondo intero.
+    * return: millisecondi trascorsi dall'Epoch Unix
+    */
+    tp = new Timespec()
+    now(tp)
+    return (tp.tv_sec * 1000) + (tp.tv_nsec / 1000000)
+
+
+def elapsed_ms(start: Timespec, end: Timespec) -> long:
+    /*
+    * Millisecondi trascorsi tra due istanti
+    * (letti con monotonic()).
+    * Serve per misurare quanto impiega una porzione di codice.
+    * argomenti:
+    *   start: istante iniziale
+    *   end: istante finale (deve essere successivo a start)
+    * return: millisecondi trascorsi tra start ed end
+    */
+    sec_diff = end.tv_sec - start.tv_sec
+    nsec_diff = end.tv_nsec - start.tv_nsec
+    return (sec_diff * 1000) + (nsec_diff / 1000000)
+
+
+def since_ms(start: Timespec) -> long:
+    /*
+    * Millisecondi trascorsi da 'start'
+    * (letto con monotonic()) fino a questo istante
+    * argomenti:
+    *   start: istante iniziale
+    * return: millisecondi trascorsi tra start e adesso
+    */
+    end = new Timespec()
+    monotonic(end)
+    return elapsed_ms(start, end)
+
+
+def sleep_ms(ms: long) -> None:
+    /*
+    * Sospende l'esecuzione del processo per @ms millisecondi.
+    * un'interruzione da segnale (EINTR) termina l'attesa in
+    * anticipo senza essere segnalata
+    * argomenti:
+    *   ms: durata dell'attesa in millisecondi
+    */
+    sec = ms / 1000
+    rem_ms = ms - (sec * 1000)
+
+    request = new Timespec()
+    remain = new Timespec()
+
+    request.tv_sec = sec
+    request.tv_nsec = rem_ms * 1000000
+
+    sys_clock_nanosleep(CLOCK_MONOTONIC, TIMER_RELATIVE, request, remain)
+
+
+def sleep_seconds(sec: long) -> None:
+    /*
+    * Sospende l'esecuzione del processo per @sec secondi
+    * comoda quando non serve precisione sub-secondo.
+    * argomenti:
+    *   sec: durata dell'attesa in secondi
+    */
+    sleep_ms(sec * 1000)
+
+
+def cpu_time_ms() -> long:
+    /*
+    * Tempo di CPU consumato finora dal processo corrente
+    * (somma di tutti i suoi thread) in millisecondi.
+    * Se il processo resta in pausa
+    * (es. dentro una sleep_ms, o in attesa di I/O)
+    * quel tempo non viene contato.
+    * return: millisecondi di CPU consumati dal processo
+    */
+    tp = new Timespec()
+    sys_clock_gettime(CLOCK_PROCESS_CPUTIME_ID, tp)
+    return (tp.tv_sec * 1000) + (tp.tv_nsec / 1000000)
+
+
+def thread_cpu_time_ms() -> long:
+    /*
+    * Tempo di CPU consumato finora dal processo corrente
+    * ma limitato al singolo thread chiamante
+    * return: millisecondi di CPU consumati dal thread corrente
+    */
+    tp = new Timespec()
+    sys_clock_gettime(CLOCK_THREAD_CPUTIME_ID, tp)
+    return (tp.tv_sec * 1000) + (tp.tv_nsec / 1000000)
+
+
+def clock_resolution_ns(which_clock: int) -> long:
+    /*
+    * Risoluzione (precisione) dell'orologio indicato in nanosecondi.
+    * argomenti:
+    *   which_clock: identificatore del clock (es. CLOCK_MONOTONIC)
+    * return: risoluzione del clock, in nanosecondi
+    */
+    tp = new Timespec()
+    sys_clock_getres(which_clock, tp)
+    return (tp.tv_sec * 1000000000) + tp.tv_nsec

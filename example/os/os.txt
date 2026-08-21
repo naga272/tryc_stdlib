@@ -1,0 +1,43 @@
+#include <libstd/stdio>
+#include <libstd/os>
+#include <libstd/process>
+
+
+/*
+* Esempio che testa le funzione di libstd/os.
+*/
+
+
+print("Numero di argomenti (incluso argv[0]): " + itoa(arg_count()) + "\n")
+
+i = 0
+while i < arg_count():
+    print("  argv[" + itoa(i) + "] = " + arg_at(i) + "\n")
+    i++
+
+
+print("HOME:  '" + getenv("HOME") + "'\n")
+print("SHELL: '" + getenv("SHELL") + "'\n")
+print("tentativo di prendere un var. inesistente: '" + getenv("loremipsumdolor"))
+
+print("\n\n                DIRECTORY DI LAVORO\n\n")
+
+print("cwd(): " + cwd() + "\n")
+
+raw_buf = malloc(4096)
+res = sys_getcwd(raw_buf, 4096)
+if res > 0:
+    print("sys_getcwd grezzo: " + raw_buf + "\n")
+
+print("\n\n\n              SISTEMA (uname)\n\n")
+
+print("os_name():       " + os_name() + "\n")
+print("hostname():      " + hostname() + "\n")
+print("os_release():    " + os_release() + "\n")
+print("kernel_version(): " + kernel_version() + "\n")
+print("machine_arch():  " + machine_arch() + "\n")
+
+
+raw_uts = malloc(UTSNAME_TOTAL_SIZE)
+sys_uname(raw_uts)
+print("\nsys_uname.sysname: " + raw_uts + "\n")

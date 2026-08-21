@@ -1,0 +1,105 @@
+#include <libstd/stdio>
+
+
+/*
+* Se non si mette il primo carattere della classe maiuscolo
+* il compilatore non blocca il programma ma da semplicemente
+* un warning durante la fase di compilazione
+*/
+class Persona --no-padding:
+    eta int
+    attiva bool
+    nome str
+
+
+/*
+* il flag --no-padding serve per dire al compilatore
+* di non provare a modificare la grandezza per migliorare
+* la velocita' di accesso alla struct.
+* Utile in particolare nei casi di protocolli (a volte richiedono
+* numero di bytes precisi), comunicazione con microcontrollori, etc...
+*/
+
+
+class PersonaCompatta --no-padding:
+    eta int
+    attiva bool
+
+
+class Point:
+    x int
+    y int
+
+
+class Rect:
+    top_left Point
+    bottom_right Point
+
+
+class Node:
+    value int
+    next Node
+
+
+def make_point(px: int, py: int) -> Point:
+    p = new Point
+    p.x = px
+    p.y = py
+    return p
+
+
+def sum_point(p: Point) -> int:
+    return p.x + p.y
+
+
+def main() -> int:
+    fails = 0
+    // classe base
+    p1 = new Point
+    p1.x = 3
+    p1.y = 4
+
+    // classe annidata (campo di tipo classe)
+    r = new Rect
+    r.top_left.x = 0
+    r.top_left.y = 0
+    r.bottom_right.x = 10
+    r.bottom_right.y = 20
+
+    // classe auto-referenziale (linked list)
+    n3 = new Node
+    n3.value = 30
+    n3.next = 0 as Node
+
+    n2 = new Node
+    n2.value = 20
+    n2.next = n3
+
+    n1 = new Node
+    n1.value = 10
+    n1.next = n2
+
+    // test con un ciclo
+    cur = n1
+    total = 0
+    count = 0
+
+    while count < 3:
+        total = total + cur.value
+        cur = cur.next
+        count++
+
+    // classe con --no-padding
+    per = new Persona
+    per.eta = 30
+    per.attiva = 1
+    per.nome = "Mario"
+
+    // heap invece di new
+    hp = heap Point
+    hp.x = 7
+    hp.y = 8
+
+    return 0
+
+main()

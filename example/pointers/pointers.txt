@@ -1,0 +1,49 @@
+#include <libstd/stdio>
+
+/*
+* Puntatori generici
+*
+* '&' e' l'operatore prefisso "indirizzo di": applicato al nome di una
+* variabile restituisce un puntatore a 8 byte al suo indirizzo, non il
+* suo valore. Il tipo risultante e' sempre <TipoDellaVariabile>* (es.
+* &x su un int produce un valore di tipo 'int*'), creato/riusato
+* automaticamente la prima volta che serve.
+*
+* 'as' e' l'operatore di cast esplicito. E' un reinterpret cast a
+* costo zero: non genera nessuna istruzione, cambia solo l'etichetta
+* di tipo con cui il compilatore tratta il valore. E' permesso SOLO
+* tra tipi della stessa dimensione in byte (qui tutti a 8 byte: ptr,
+* long, str) - non e' una conversione numerica, quindi non tronca ne'
+* estende (niente cast tra int/short/char di dimensioni diverse).
+*
+* Sintassi del tipo bersaglio dopo 'as':
+*   - un tipo gia' esistente ('long', 'str', ecc.)
+*   - 'ptr <tipo>' per ottenere/creare esplicitamente un tipo puntatore
+*
+* Un parametro di funzione dichiarato come '&T' (usato ad esempio nelle
+* firme extern di libsqlite3, vedi /example/sqlite3) si aspetta
+* l'indirizzo di una variabile di tipo T: va chiamato passando sempre
+* '&variabile', mai la variabile per valore.
+*/
+
+
+// funzione con un parametro "by reference": si aspetta l'indirizzo
+// di un int (tipo 'int*' lato chiamante), non un int per valore
+def scrivi_su(dest: &int) -> int:
+    return 0
+
+
+x = 5
+
+// &x e' di tipo 'int*': un indirizzo a 8 byte, non un int a 4 byte
+p = &x
+
+// reinterpret cast: nessuna istruzione generata, solo un cambio di
+// etichetta di tipo - 'p' resta lo stesso identico indirizzo
+come_long = p as long
+come_ptr_int = p as ptr int
+come_str = p as str
+
+// il parametro '&int' si chiama passando l'indirizzo, non il valore
+risultato = scrivi_su(&x)
+print("puntatori: fatto\n")

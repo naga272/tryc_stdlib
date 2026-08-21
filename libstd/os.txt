@@ -1,0 +1,461 @@
+
+/*
+*   Standard library per interagire col sistema operativo: argomenti
+*   da riga di comando, variabili d'ambiente, identita' del processo
+*   directory di lavoro, informazioni sul sistema
+*   (uname).
+*
+*   argc/argv/envp sono catturati una volta sola all'avvio del
+*   processo se non e' stato passato il flag (macro init_argument_cmd, invocata da _start std_foo.asm),
+*   leggendo lo stack cosi' come lo lascia il kernel subito dopo l'exec.
+*/
+
+#define SYS_GETCWD   79
+#define SYS_CHDIR    80
+#define SYS_UNAME    63
+#define SYS_SYS_INFO 99
+
+#ifndef UTSNAME_FIELD_SIZE
+// struct new_utsname del kernel (<linux/utsname.h>): 6 campi da 65
+// byte ciascuno (stringa NULL-terminated), 390 byte totali.
+#define UTSNAME_FIELD_SIZE 65
+#endif
+
+#ifndef UTSNAME_TOTAL_SIZE
+#define UTSNAME_TOTAL_SIZE 390
+#endif
+
+#ifndef UTSNAME_OFF_SYSNAME
+#define UTSNAME_OFF_SYSNAME 0
+#endif
+
+#ifndef UTSNAME_OFF_NODENAME
+#define UTSNAME_OFF_NODENAME 65
+#endif
+
+#ifndef UTSNAME_OFF_RELEASE
+#define UTSNAME_OFF_RELEASE 130
+#endif
+
+#ifndef UTSNAME_OFF_VERSION
+#define UTSNAME_OFF_VERSION 195
+#endif
+
+#ifndef 
+#define UTSNAME_OFF_MACHINE 260
+#endif
+
+#ifndef 
+#define UTSNAME_OFF_DOMAINNAME 325
+#endif
+
+
+#ifndef OS_PATH_MAX
+// dimensione di un buffer sufficiente per un percorso assoluto
+#define OS_PATH_MAX 4096
+#endif
+
+/*
+In the above structure, the sizes of the memory and swap fields
+are given in bytes.
+
+Since Linux 2.3.23 (i386) and Linux 2.3.48 (all architectures) the
+structure is:
+
+struct sysinfo {
+    long uptime;             Seconds since boot
+    unsigned long loads[3];  1, 5, and 15 minute load averages
+    unsigned long totalram;  Total usable main memory size
+    unsigned long freeram;   Available memory size
+    unsigned long sharedram; Amount of shared memory
+    unsigned long bufferram; Memory used by buffers
+    unsigned long totalswap; Total swap space size
+    unsigned long freeswap;  Swap space still available
+    unsigned short procs;    Number of current processes
+    unsigned long totalhigh; Total high memory size
+    unsigned long freehigh;  Available high memory size
+    unsigned int mem_unit;   Memory unit size in bytes
+    char _f[20-2*sizeof(long)-sizeof(int)]; Padding to 64 bytes
+};
+
+cit. https://man7.org/linux/man-pages/man2/sysinfo.2.html
+*/
+
+class SysInfo --no-padding:
+    uptime long
+    load1 long
+    load2 long
+    load3 long
+    total_ram long
+    free_ram long
+    sharedram long
+    bufferram long
+    totalswap long
+    freeswap long
+    procs short
+    totalhigh long
+    freehigh long
+    mem_unit int
+    __pad0 long
+    __pad1 long
+    __pad2 long
+    __pad3 long
+    __pad4 long
+    __pad5 long
+    __pad6 long
+    __pad7 long
+
+
+def sys_sysinfo(sysinfo_i: SysInfo) -> int:
+    asminline(
+        mov rax, SYS_SYS_INFO
+        syscall
+    )endasm
+
+
+def sysinfo(sysinfo_i: SysInfo) -> int:
+    response = sys_sysinfo(sysinfo_i)
+    if response != 0:
+        print("error to call sys_info()")
+        exit(1)
+    return response
+
+
+/* ARGOMENTI DA RIGA DI COMANDO */
+
+def arg_count() -> int:
+    /*
+    * Numero di argomenti passati al programma da riga di comando
+    * return: numero di argomenti
+    */
+    asminline(
+        mov rax, [argc]
+    ) endasm
+
+
+def arg_at(index: int) -> str:
+    /*
+    * Argomento da riga di comando all'indice 'index'
+    * (0 = nome del programma stesso, come argv[0] in C).
+    * argomenti:
+    *   index: indice dell'argomento desiderato (0..arg_count()-1)
+    * return: l'argomento richiesto
+    */
+    asminline(
+        ; salvo index
+        push rdi
+        ; rdi=index (gia' li'), rsi=argc non ritorna se index e' fuori range
+        mov rsi, [argc]
+        call rt_check_array_bounds
+        ; ripristina index
+        pop rdi
+        mov rax, [argv]
+        mov rax, [rax + rdi * 8]
+        ; non serve rt_promote
+    ) endasm
+
+
+/* VARIABILI D'AMBIENTE */
+
+def getenv(name: str) -> str:
+    /*
+    * Cerca @name nell'ambiente del processo
+    * (l'array envp catturato da init_argument_cmd all'avvio,
+    * voci nella forma "CHIAVE=VALORE").
+    * Confronto esatto sul nome, case-sensitive 
+    * (non un prefisso: "PATH" non combacia con "PATH2").
+    * argomenti:
+    *   name: nome della variabile d'ambiente da cercare (es. "HOME")
+    * return: il valore associato, o "" (stringa vuota) se non trovata
+    */
+    asminline(
+        push rbx
+        push r12
+        push r13
+        push r14
+        push r15
+
+        mov r12, rdi    ; r12 = name*
+
+        mov rdi, r12
+        call rt_strlen
+        mov r13, rax    ; r13 = strlen(name)
+
+        mov r14, [envp] ; r14 = cursore nell'array envp
+
+        .env_loop:
+            ; rbx = envp[i] ("CHIAVE=VALORE\0"), o NULL
+            mov rbx, [r14]
+            test rbx, rbx
+            jz .not_found
+
+            ; confronta i primi r13 byte di [rbx] con [r12] (name)
+            xor r15, r15
+            .cmp_loop:
+                ; tutti i byte di 'name' combaciano finora
+                cmp r15, r13
+                jge .prefix_matched
+
+                movzx eax, byte [rbx + r15]
+                movzx ecx, byte [r12 + r15]
+                cmp al, cl
+                jne .next_entry
+                test al, al
+                ; se l'entry finisce prima di name non puo' combaciare
+                jz .next_entry
+
+                inc r15
+                jmp .cmp_loop
+
+            .prefix_matched:
+                cmp byte [rbx + r15], '='
+                jne .next_entry
+                ; puntatore al valore, subito dopo '='
+                lea rax, [rbx + r15 + 1]
+                jmp .found
+
+            .next_entry:
+            add r14, 8
+            jmp .env_loop
+
+        .not_found:
+            mov rdi, 1
+            call rt_alloc
+            jmp .getenv_done
+
+        .found:
+        .getenv_done:
+        push rax
+        mov rdi, rax
+        mov rsi, 1
+        call rt_promote
+        pop rax
+
+        pop r15
+        pop r14
+        pop r13
+        pop r12
+        pop rbx
+    ) endasm
+
+
+/* DIRECTORY DI LAVORO */
+
+def sys_getcwd(buf: str, size: int) -> int:
+    /*
+    * wrapper della syscall getcwd.
+    * argomenti:
+    *   buf: buffer in cui scrivere il percorso
+    *   size: dimensione di 'buf' in byte
+    * return: lunghezza del percorso scritto,
+    *    < 0 in caso di errore (es. buffer troppo piccolo)
+    */
+    asminline(
+        mov rax, SYS_GETCWD
+        syscall
+    ) endasm
+
+
+def cwd() -> str:
+    /*
+    * Directory di lavoro corrente del processo.
+    * return: percorso assoluto della cwd
+    */
+    asminline(
+        mov rdi, OS_PATH_MAX
+        call rt_alloc
+        mov r8, rax     ; r8 = offset base del buffer
+
+        mov rdi, r8
+        mov rsi, OS_PATH_MAX
+        call sys_getcwd
+
+        mov rax, r8
+
+        push rax
+        mov rdi, rax
+        mov rsi, 1
+        call rt_promote
+        pop rax
+    ) endasm
+
+
+def sys_chdir(path: str) -> int:
+    /*
+    * Cambia la directory di lavoro corrente del processo.
+    * argomenti:
+    *   path: nuovo percorso (assoluto o relativo alla cwd attuale)
+    * return: 0 in caso di successo, < 0 in caso di errore
+    */
+    asminline(
+        mov rax, SYS_CHDIR
+        syscall
+    ) endasm
+
+
+/* INFORMAZIONI SUL SISTEMA (uname) */
+
+def sys_uname(buf: str) -> int:
+    /*
+    * Wrapper della syscall uname 
+    * argomenti:
+    *   buf: deve puntare ad almeno UTSNAME_TOTAL_SIZE byte gia' allocati.
+    * return: 0 in caso di successo, un valore negativo in caso di errore
+    */
+    asminline(
+        mov rax, SYS_UNAME
+        syscall
+    ) endasm
+
+
+def uname_field(offset: int) -> str:
+    /*
+    * Helper interno.
+    * Alloca il buffer raw per uname(), esegue la syscall
+    * restituendo il puntatore al campo che inizia a 'offset' byte
+    * dall'inizio del buffer
+    */
+    asminline(
+        push rdi
+
+        mov rdi, UTSNAME_TOTAL_SIZE
+        call rt_alloc
+        mov r8, rax     ; r8 = offset base del buffer
+
+        push r8
+
+        mov rdi, r8
+        call sys_uname
+
+        pop r8
+        pop rdi     ; ripristina offset
+
+        lea rax, [r8 + rdi]     ; rax = puntatore al campo richiesto
+
+        push rax
+        mov rdi, r8     ; promuove r8 fino alla radice
+        call rt_promote_to_root
+        pop rax
+    ) endasm
+
+
+def os_name() -> str:
+    /*
+    * Nome del sistema operativo (campo sysname di uname, es. "Linux")
+    */
+    return uname_field(UTSNAME_OFF_SYSNAME)
+
+
+def hostname() -> str:
+    /*
+    * Nome host della macchina (campo nodename di uname)
+    */
+    return uname_field(UTSNAME_OFF_NODENAME)
+
+
+def os_release() -> str:
+    /*
+    * Release del sistema operativo
+    * (campo release di uname, es. "6.1.0-kali9-amd64")
+    */
+    return uname_field(UTSNAME_OFF_RELEASE)
+
+
+def kernel_version() -> str:
+    /*
+    * Versione del kernel, con data/ora di build
+    * (campo version di uname)
+    */
+    return uname_field(UTSNAME_OFF_VERSION)
+
+
+def machine_arch() -> str:
+    /*
+    * Architettura hardware
+    * (campo machine di uname, es. "x86_64")
+    */
+    return uname_field(UTSNAME_OFF_MACHINE)
+
+
+def to_absolute_path(path: str) -> str:
+    if strlen(path) == 0:
+        return cwd()
+    if path[0] == '/':
+        return path
+    rel = path
+    if strlen(path) >= 2:
+        if path[0] == '.':
+            if path[1] == '/':
+                rel = path + 2
+    return cwd() + "/" + rel
+
+
+def sys_readlink(path: str, buf: str, size: int) -> int:
+    /*
+    * Risolve un link simbolico
+    * (wrapper diretto della syscall readlink).
+    * A differenza di sys_getcwd, non scrive un terminatore '\0':
+    * il kernel scrive solo i byte veri del percorso risolto,
+    * a lunghezza va presa dal valore di ritorno e il terminatore va
+    * aggiunto a mano da chi chiama.
+    * argomenti:
+    *   path: percorso del link simbolico da risolvere (es.
+    *     "/proc/self/exe")
+    *   buf: buffer in cui scrivere il percorso risolto
+    *   size: dimensione di 'buf' in byte
+    * return: numero di byte scritti in 'buf', o un valore negativo in
+    *   caso di errore
+    */
+    asminline(
+        mov rax, SYS_READLINK
+        syscall
+    ) endasm
+
+
+def exe_path() -> str:
+    /*
+    * Percorso assoluto del binario ESEGUIBILE in esecuzione, risolvendo
+    * il link simbolico /proc/self/exe che il kernel mantiene sempre
+    * puntato al file vero del processo corrente.
+    * Fornisce il percorso assoluto del file compilato
+    * indipendentemente da dove/come e' stato invocato.
+    *
+    * return: percorso assoluto del binario in esecuzione,
+    *         o "" in caso di errore (es. /proc non montato)
+    */
+    buf = rt_alloc_up(OS_PATH_MAX)
+    written = sys_readlink("/proc/self/exe", buf, OS_PATH_MAX)
+    if written < 0:
+        return ""
+    buf[written] = '\0'
+    return buf
+
+
+def package_manager_name() -> str:
+    /*
+    * Rileva il gestore di pacchetti disponibile sul sistema, provando
+    * il percorso eseguibile standard (FHS) di ciascuno.
+    * argomenti: nessuno
+    * return: nome del comando da usare per installare pacchetti
+    *   ("apt", "dnf", "yum", "pacman", "zypper", "apk", "xbps-install", "emerge"),
+    *   oppure "" se nessuno dei gestori noti e' presente
+    */
+    if sys_access("/usr/bin/apt", X_OK) == 0:
+        return "apt"
+    if sys_access("/usr/bin/dnf", X_OK) == 0:
+        return "dnf"
+    if sys_access("/usr/bin/yum", X_OK) == 0:
+        return "yum"
+    if sys_access("/usr/bin/pacman", X_OK) == 0:
+        return "pacman"
+    if sys_access("/usr/bin/zypper", X_OK) == 0:
+        return "zypper"
+    if sys_access("/sbin/apk", X_OK) == 0:
+        return "apk"
+    if sys_access("/usr/bin/apk", X_OK) == 0:
+        return "apk"
+    if sys_access("/usr/bin/xbps-install", X_OK) == 0:
+        return "xbps-install"
+    if sys_access("/usr/bin/emerge", X_OK) == 0:
+        return "emerge"
+    return ""

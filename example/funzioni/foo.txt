@@ -1,0 +1,30 @@
+
+#include <libstd/stdio>
+
+
+def foo() -> int:
+    val = 22 + 15
+    return val
+
+
+def foo2() -> str:
+    stringa = "ciao" + "ciao" 
+    return stringa
+
+
+inline def foo3() -> str:
+    return "ciao" + "ciao"
+
+
+def divmod(a: int, b: int) -> (int, int):
+    return a / b, a % b
+
+
+def main() -> None:
+    valore = foo()
+    stringa_out = foo2()
+    // q=3, r=2
+    q, r = divmod(17, 5)
+
+
+main()

@@ -1,0 +1,100 @@
+#include <libstd/stdio>
+
+/*
+* file usato per testare if, elif e else (risolto)
+*/
+
+def checkint(label: str, got: int, want: int) -> int:
+	if got == want:
+		print("OK   " + label + "\n")
+		return 0
+	print("FAIL " + label + " got=" + itoa(got) + " want=" + itoa(want) + "\n")
+	return 1
+
+
+def classify(x: int) -> int:
+	// if/elif/else "classico", con return in ogni ramo
+	if x < 0:
+		return -1
+	elif x == 0:
+		return 0
+	elif x < 10:
+		return 1
+	else:
+		return 2
+
+
+def only_else(x: int) -> int:
+	if x > 0:
+		return 100
+	else:
+		return -100
+
+
+def only_elif_no_else(x: int) -> int:
+	if x == 1:
+		return 11
+	elif x == 2:
+		return 22
+	return 0
+
+
+def plain_if_untouched(x: int) -> int:
+	result = 0
+	if x == 5:
+		result = 55
+	return result
+
+
+def nested_chain(x: int, y: int) -> int:
+	// if/else annidato dentro un altro if/else
+	if x > 0:
+		if y > 0:
+			return 1
+		else:
+			return 2
+	else:
+		if y > 0:
+			return 3
+		else:
+			return 4
+
+
+def in_loop(n: int) -> int:
+	// if/elif/else dentro un while, con break/continue - verifica che
+	// l'arena e le etichette di while non vadano in conflitto con
+	// quelle if/elif/else
+	total = 0
+	i = 0
+	while i < n:
+		if i == 3:
+			i++
+			continue
+		elif i == 7:
+			break
+		else:
+			total = total + i
+		i++
+	return total
+
+
+val_test2 = 44
+
+if val_test2 < 1:
+    print("lorem " + "ipsum")
+
+
+val = 15
+
+if val > 33:
+    print("val maggiore di 33")
+
+if val < 33:
+    print("val minore di 33")
+
+
+val = 33
+
+
+if val + val_test2 <= 33:
+    print("val minore di 33")

@@ -1,0 +1,162 @@
+
+#include <libstd/macro>
+
+#define SYS_MMAP 9
+#define SYS_MPROTECT 10
+#define SYS_MUNMAP 11
+#define SYS_BRK 12
+
+// Access mode (mutuamente esclusivi)
+#ifndef O_RDONLY
+#define O_RDONLY      0    // sola lettura
+#endif
+
+#ifndef O_WRONLY
+#define O_WRONLY      1    // sola scrittura
+#endif
+
+#ifndef O_RDWR
+#define O_RDWR        2    // lettura e scrittura
+#endif
+
+#ifndef O_ACCMODE
+#define O_ACCMODE     3    // mask per i 3 sopra
+#endif
+
+#ifndef CLASSIS
+#define CLASSIS 420   // lettura / scrittura file di testo classici
+#endif
+
+#ifndef BINARY
+#define BINARY  493   // eseguibile pubblico
+#endif
+
+#ifndef O_OWNER
+#define O_OWNER 384   // solo owner
+#endif
+
+#ifndef S_IRUSR
+#define S_IRUSR 256   // read by owner
+#endif
+
+#ifndef S_IWUSR
+#define S_IWUSR 128   // write by owner
+#endif
+
+#ifndef S_IXUSR
+#define S_IXUSR 64    // execute by owner
+#endif
+
+#ifndef S_IRGRP
+#define S_IRGRP 32   // read by group
+#endif
+
+#ifndef S_IWGRP
+#define S_IWGRP 16   // write by group
+#endif
+
+#ifndef S_IXGRP
+#define S_IXGRP 8    // execute by group
+#endif
+
+#ifndef S_IROTH
+#define S_IROTH 4   // read by others
+#endif
+
+#ifndef S_IWOTH
+#define S_IWOTH 2   // write by others
+#endif
+
+#ifndef S_IXOTH
+#define S_IXOTH 1   // execute by others
+#endif
+
+// File creation / status flags
+#ifndef O_CREAT
+#define O_CREAT       64    // crea se non esiste
+#endif
+
+#ifndef O_EXCL
+#define O_EXCL        128    // con O_CREAT: fallisce se il file esiste
+#endif
+
+#ifndef O_NOCTTY
+#define O_NOCTTY      256    // non diventare controlling tty
+#endif
+
+#ifndef O_TRUNC
+#define O_TRUNC       512    // tronca il file se già esiste
+#endif
+
+// File status flags
+#ifndef O_APPEND
+#define O_APPEND      1024    // scrittura in append
+#endif
+
+#ifndef O_NONBLOCK
+#define O_NONBLOCK    2048    // I/O non bloccante
+#endif
+
+#ifndef O_DSYNC
+#define O_DSYNC       4096    // scritture sincrone (data)
+#endif
+
+#ifndef FASYNC
+#define FASYNC        8192    // notifica asincrona (obsolete)
+#endif
+
+#ifndef O_DIRECT
+#define O_DIRECT      16384    // I/O diretto (salta il cache)
+#endif
+
+#ifndef O_LARGEFILE
+#define O_LARGEFILE   32768    // (compatibilità 32-bit)
+#endif
+
+// Directory e symlink handling
+#ifndef O_DIRECTORY
+#define O_DIRECTORY   65536     // deve essere una directory
+#endif
+
+#ifndef O_NOFOLLOW
+#define O_NOFOLLOW    131072    // non seguire symlink
+#endif
+
+#ifndef O_CLOEXEC
+#define O_CLOEXEC     524288    // close-on-exec (FD_CLOEXEC)
+#endif
+
+// flags per mmap
+#ifndef MAP_PRIVATE
+#define MAP_PRIVATE     2       // Cambi locali, niente sync su file
+#endif
+
+#ifndef MAP_ANONYMOUS
+#define MAP_ANONYMOUS   32      // Nessun file backing (solo RAM)
+#endif
+
+#ifndef MAP_STACK
+#define MAP_STACK       131072  // Allocazione ottimizzata per stack
+#endif
+
+#ifndef MAP_GROWSDOWN
+#define MAP_GROWSDOWN   256     // Stack cresce verso indirizzi bassi
+#endif
+
+
+// FLAGS X MEM PROT
+#ifndef PROT_READ
+#define PROT_READ       1
+#endif
+
+#ifndef PROT_WRITE
+#define PROT_WRITE      2
+#endif
+
+#ifndef PROT_EXEC
+#define PROT_EXEC       4
+#endif
+
+#ifndef PROT_NONE
+#define PROT_NONE       8
+#endif

@@ -1,0 +1,51 @@
+#include <libstd/net>
+#include <libstd/sqlite3>
+
+#include <libstd/file>
+
+db1 =: sqlite3
+
+print("sqlite3 v: " + sqlite3_libversion() + "\n")
+response = sqlite3_open("./test.db", &db1)
+if response < 0:
+    print("error! response value: " + itoa(response))
+    exit(0)
+
+
+// sqlite3_exec_w(db1, "CREATE TABLE Clients(fd INTEGER);")
+
+
+settings_sock = new Sockaddr_in()
+
+set_sin_fam(settings_sock, AF_INET, 0x00)
+set_door(settings_sock, 9000)
+set_sockip(settings_sock, 127, 0, 0, 1)
+
+flag_sock_opt = 1
+fd_server = socket(AF_INET, SOCK_STREAM, TCP)
+sys_setsockopt(fd_server, TCP, TCP_DEFER_ACCEPT, &flag_sock_opt)
+
+
+print("fd value = " + itoa(fd_server) + "\n")
+
+bind(fd_server, settings_sock)
+print("success Binding\n")
+
+listen(fd_server, 20)
+print("ready to listen\n")
+
+print("ready to accept on 127.0.0.1:9000\n")
+
+body = "<html><body><h1>Lorem Ipsum dolorem</h1></body></html>"
+len_body = strlen(body)
+head = "HTTP/1.1 200 OK\nContent-Type: text/html\nContent-Length: " + itoa(len_body) + "\nConnection: keep-alive\n\n"
+content = head + body
+len_content = strlen(content)
+
+
+while 1: 
+    fd_client = accept(fd_server, 0)
+    sys_setsockopt(fd_client, TCP, TCP_NODELAY, &flag_sock_opt)
+    // sqlite3_exec_w(db1, "INSERT INTO Clients(fd) VALUES(" + itoa(fd_client) + ");")
+    sys_write(fd_client, content, len_content)
+    sys_close(fd_client)

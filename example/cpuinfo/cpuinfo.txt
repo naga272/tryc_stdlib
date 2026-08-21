@@ -1,0 +1,38 @@
+#include <libstd/stdio>
+#include <libstd/cpuinfo>
+
+/*
+* Esempio che esercita tutte le funzioni libstd/cpuinfo.
+*/
+
+print("               CPU INFO\n\n\n")
+print("Vendor:  " + cpu_vendor() + "\n")
+print("Brand:   " + cpu_brand() + "\n")
+print("Family:  " + itoa(cpu_family()) + "\n")
+print("Model:   " + itoa(cpu_model()) + "\n")
+print("Stepping: " + itoa(cpu_stepping()) + "\n")
+print("Dimensione linea di cache: " + itoa(cpu_cache_line_size()) + " byte\n")
+print("Indirizzamento fisico:   " + itoa(physical_address_bits()) + " bit\n")
+print("Indirizzamento virtuale: " + itoa(virtual_address_bits()) + " bit\n")
+print("CPU logiche disponibili: " + itoa(logical_cpu_count()) + "\n")
+print("In esecuzione in una VM: " + itoa(is_hypervisor()) + "\n")
+print("\n-- feature flag --\n")
+print("MMX:     " + itoa(has_mmx()) + "\n")
+print("SSE2:    " + itoa(has_sse2()) + "\n")
+print("SSE3:    " + itoa(has_sse3()) + "\n")
+print("SSSE3:   " + itoa(has_ssse3()) + "\n")
+print("SSE4.1:  " + itoa(has_sse41()) + "\n")
+print("SSE4.2:  " + itoa(has_sse42()) + "\n")
+print("AVX:     " + itoa(has_avx()) + "\n")
+print("AVX2:    " + itoa(has_avx2()) + "\n")
+print("AVX512F: " + itoa(has_avx512f()) + "\n")
+print("AES:     " + itoa(has_aes()) + "\n")
+print("RDRAND:  " + itoa(has_rdrand()) + "\n")
+print("POPCNT:  " + itoa(has_popcnt()) + "\n")
+print("FMA:     " + itoa(has_fma()) + "\n")
+
+
+raw = new CpuidResult()
+cpuid(0, 0, raw)
+
+print("\nCPUID leaf 0 (max leaf): " + itoa(raw.eax) + "\n")

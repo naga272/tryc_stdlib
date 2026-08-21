@@ -1,0 +1,10 @@
+#include <libstd/stdio>
+
+libextern </lib/x86_64-linux-gnu/libsqlite3.so>
+
+extern def sqlite3_libversion() -> str
+
+extern class sqlite3
+extern class sqlite3_stmt
+
+print(sqlite3_libversion())

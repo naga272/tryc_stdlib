@@ -1,0 +1,30 @@
+#include <libstd/stdio>
+
+msg = "Hello World"
+
+/*
+Bisogna seguire lo standard V_ABI per arch x86_64:
+
+{
+    "x86_64": {
+        "argument": ("rdi", "rsi", "rdx", "rcx", "r8", "r9",),
+        "pres_reg": ("rbx", "r12", "r13", "r14", "r15",),
+        "scratch_reg": (
+            "rax", "rdi", "rsi", "rdx", "rcx", "r8", "r9", "r10", "r1"
+        ),
+        "float_sse2": (
+            "xmm0", "xmm1", "xmm2", "xmm3",
+            "xmm4", "xmm5", "xmm6", "xmm7",
+            "xmm8", "xmm9", "xmm10", "xmm11",
+            "xmm12", "xmm13", "xmm14", "xmm15",
+        ),
+        "ret": ("rax",)
+    },
+}
+
+*/
+
+asminline(
+mov rdi, [msg]
+call print
+) endasm

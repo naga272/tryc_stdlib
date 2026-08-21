@@ -1,0 +1,83 @@
+libextern </lib/x86_64-linux-gnu/libsqlite3.so>
+
+#include <libstd/stdio>
+
+#define SQLITE_OK           0
+#define SQLITE_ERROR        1
+#define SQLITE_INTERNAL     2
+#define SQLITE_PERM         3
+#define SQLITE_ABORT        4
+#define SQLITE_BUSY         5
+#define SQLITE_LOCKED       6
+#define SQLITE_NOMEM        7
+#define SQLITE_READONLY     8
+#define SQLITE_INTERRUPT    9
+#define SQLITE_IOERR        10
+#define SQLITE_CORRUPT      11
+#define SQLITE_NOTFOUND     12
+#define SQLITE_FULL         13
+#define SQLITE_CANTOPEN     14
+
+extern class sqlite3
+extern class sqlite3_stmt
+
+extern def sqlite3_libversion() -> str
+extern def sqlite3_open(filename: str, ppDb: &sqlite3) -> int
+extern def sqlite3_exec(dbs: sqlite3, sql: str, callback: int, arg: int, errmsg: &str) -> int
+extern def sqlite3_close(dbs: sqlite3) -> int
+extern def sqlite3_free(ptr: str) -> None
+extern def sqlite3_prepare_v2(dbs: sqlite3, SQL: str, nBytes: int, stmt: &sqlite3_stmt, ptr: int) -> int
+extern def sqlite3_bind_text(stmt: sqlite3_stmt, index: int, text: str, len_text: int, flag: int) -> int
+extern def sqlite3_step(stmt: sqlite3_stmt) -> int
+extern def sqlite3_finalize(stmt: sqlite3_stmt) -> int
+
+#define SQLITE_TRANSIENT -1
+// non ci sono piu righe
+#define SQLITE_DONE 101
+// e' disponibile una riga di risultati.
+#define SQLITE_ROW 100
+
+def sqlite3_checker_error(dbs: sqlite3, response: int, error: str) -> int:
+    if response != SQLITE_OK:
+        print(error + "\n")
+        sqlite3_free(error)
+        sqlite3_close(dbs)
+        exit(1)
+
+    sqlite3_free(error)
+    return response
+
+
+def response_sqlite3_query(arg: int, argc: int, argv: str, azColName: int) -> int:
+    return 0
+
+
+def sqlite3_exec_w(dbs: sqlite3, query: str) -> int:
+    errmsg =: str
+    response = sqlite3_exec(dbs, query, 0, 0, &errmsg)
+    response = sqlite3_checker_error(dbs, response, errmsg)
+    return response
+
+
+def sqlite3_drop_table(dbs: sqlite3, name_table: str) -> int:
+    errmsg =: str
+    query = "DROP TABLE " + name_table + ";"
+    response = sqlite3_exec(dbs, query, 0, 0, &errmsg)
+    return sqlite3_checker_error(dbs, response, errmsg)
+
+
+def sqlite3_run_query(dbs: sqlite3) -> None:
+    err_msg =: str
+    response = sqlite3_exec(dbs, "SELECT * FROM Users;", 0, 0, &err_msg)
+    sqlite3_checker_error(dbs, response, err_msg)
+
+
+def sqlite3_prepare_stmnt(dbs: sqlite3, sql: str, stmt: &sqlite3_stmt) -> int:
+    response = sqlite3_prepare_v2(dbs, sql, -1, stmt, 0)
+    return response
+
+
+def sqlite3_bind(stmt: sqlite3_stmt, index: int, text: str) -> int:
+    size_text = strlen(text)
+    response = sqlite3_bind_text(stmt, index, text, size_text, SQLITE_TRANSIENT)
+    return response

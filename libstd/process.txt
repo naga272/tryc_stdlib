@@ -1,0 +1,348 @@
+#include <libstd/macro>
+
+
+/*
+* Standard library per la gestione dei processi.
+* NB: in questo modulo viene usato l'heap.
+*/
+
+#define SYS_GETPID 39
+#define SYS_CLONE 56
+#define SYS_FORK 57
+#define SYS_VFORK 58
+#define SYS_EXECVE 59
+#define SYS_EXIT 60
+#define SYS_WAIT4 61
+#define SYS_KILL 62
+#define SYS_GETUID   102
+#define SYS_GETGID   104
+#define SYS_GETEUID  107
+#define SYS_GETEGID  108
+#define SYS_GETPPID  110
+
+#ifndef CLONE_VM
+#define CLONE_VM        256     // Condivide lo spazio di indirizzi (memoria) tra padre e figlio
+#endif
+
+#ifndef CLONE_FS
+#define CLONE_FS        512     // Condivide info filesystem (cwd, umask)
+#endif
+
+#ifndef CLONE_FILES
+#define CLONE_FILES     1024    // Condivide file descriptors
+#endif
+
+#ifndef CLONE_SIGHAND
+#define CLONE_SIGHAND   2048    // Condivide signal handlers
+#endif
+
+#ifndef SIGHUP
+#define SIGHUP	    1	// Hangup (controllo terminale chiuso)
+#endif
+
+#ifndef SIGINT
+#define SIGINT	    2	// Interruzione (Ctrl+C)
+#endif
+
+#ifndef SIGQUIT
+#define SIGQUIT	    3	// Uscita (Ctrl+)
+#endif
+
+#ifndef SIGILL
+#define SIGILL	    4	// Istruzione illegale
+#endif
+
+#ifndef SIGTRAP
+#define SIGTRAP	    5	// Trap (trappola)
+#endif
+
+#ifndef SIGABRT
+#define SIGABRT	    6	// Aborto
+#endif
+
+#ifndef SIGBUS
+#define SIGBUS	    7	// Errore di bus
+#endif
+
+#ifndef SIGFPE
+#define SIGFPE	    8	// Eccezione in virgola mobile
+#endif
+
+#ifndef SIGKILL
+#define SIGKILL     9   // Terminazione forzata, non catturabile
+#endif
+
+#ifndef SIGUSR1
+#define SIGUSR1     10  // Segnale utente definito dall’applicazione
+#endif
+
+#ifndef SIGSEGV
+#define SIGSEGV	    11	// Violazione di segmentazione
+#endif
+
+#ifndef SIGUSR2
+#define SIGUSR2     12  // Altro segnale utente definito dall’applicazione
+#endif
+
+#ifndef SIGPIPE
+#define SIGPIPE	    13	// Pipe rotta
+#endif
+
+#ifndef SIGALRM
+#define SIGALRM	    14	// Timer scaduto
+#endif
+
+#ifndef SIGTERM
+#define SIGTERM     15  // Terminazione richiesta
+#endif
+
+#ifndef SIGSTKFLT
+#define SIGSTKFLT	16	// Errore di stack sul coprocessore
+#endif
+
+#ifndef SIGCHLD
+#define SIGCHLD     17  // Il figlio è terminato
+#endif
+
+#ifndef SIGCONT
+#define SIGCONT	    18	// Continua l'esecuzione
+#endif
+
+#ifndef SIGSTOP
+#define SIGSTOP	    19	// Ferma l'esecuzione (non catturabile)
+#endif
+
+#ifndef SIGTSTP
+#define SIGTSTP	    20	// Ferma l'esecuzione (Ctrl+Z)
+#endif
+
+#ifndef SIGTTIN
+#define SIGTTIN	    21	// Lettura in background da terminale
+#endif
+
+#ifndef SIGTTOU
+#define SIGTTOU	    22	// Scrittura in background su terminale
+#endif
+
+#ifndef SIGURG
+#define SIGURG	    23	// Dati urgenti disponibili su socket
+#endif
+
+#ifndef SIGXCPU
+#define SIGXCPU	    24	// Limite di tempo CPU superato
+#endif
+
+#ifndef SIGXFSZ
+#define SIGXFSZ	    25	// Limite di dimensione file superato
+#endif
+
+#ifndef SIGVTALRM
+#define SIGVTALRM	26	// Timer virtuale scaduto
+#endif
+
+#ifndef SIGPROF
+#define SIGPROF	    27	// Timer di profiling scaduto
+#endif
+
+#ifndef SIGWINCH
+#define SIGWINCH	28	// Cambio di dimensione finestra terminale
+#endif
+
+#ifndef SIGPOLL
+#define SIGPOLL	    29	// Evento pollable
+#endif
+
+#ifndef SIGIO
+#define SIGIO	    29	// I/O ora possibile
+#endif
+
+#ifndef SIGPWR
+#define SIGPWR	    30	// Guasto di alimentazione
+#endif
+
+#ifndef SIGSYS
+#define SIGSYS	    31	// Chiamata di sistema non valida
+#endif
+
+#ifndef CHILD_STACK_SIZE
+#define CHILD_STACK_SIZE (16 * 1024)  // stack per il figlio
+#endif
+
+
+#ifndef ECHILD
+#define ECHILD -10      // error child
+#endif
+
+
+def sys_fork() -> int:
+    asminline(
+        mov rax, SYS_FORK
+        syscall
+    ) endasm
+
+
+def sys_kill() -> None:
+    asminline(
+        mov rax, SYS_KILL
+        syscall
+    ) endasm
+
+
+def sys_vfork() -> int:
+    asminline(
+        mov rax, SYS_VFORK
+        syscall
+    )endasm
+
+
+def fork() -> int:
+    /*
+    * val < 0: The creation of a child process was unsuccessful, then it returns -1.
+    * val == Zero: Returned to the newly created child process.
+    * val > 0: Returned to parent or caller. The value contains the process ID of the newly created child process.
+    */
+    pid = sys_fork()
+    if pid < 0:
+        print("error, pid value: " + itoa(pid) + "\n")
+    return pid
+
+
+def sys_execve(command: str) -> int:
+    asminline(
+        mov rax, SYS_EXECVE
+        syscall
+    ) endasm
+
+
+class ArgsClone:
+    reg_rdx str
+    reg_rdi str
+    reg_rsi str
+    reg_r8 str
+    reg_r9 str
+    reg_r10 str
+    reg_r11 str
+    reg_r12 str
+    reg_r13 str
+    reg_r14 str
+    reg_r15 str
+
+
+def sys_clone(stack_child_ptr: str) -> int:
+    asminline(
+        mov rsi, rdi
+        mov rdi, CLONE_VM | CLONE_SIGHAND | CLONE_FILES | CLONE_FS | SIGCHLD
+        xor rdx, rdx 
+        xor r10, r10
+        xor r8, r8
+        xor r9, r9
+        mov rax, SYS_CLONE
+        syscall
+    )endasm
+
+
+def do_clone(function: str, args: &ArgsClone) -> None:
+    stack_child_ptr = malloc(CHILD_STACK_SIZE)
+    asminline (
+        ; dall'alto verso il basso
+        add qword[rbp - 64], CHILD_STACK_SIZE
+        ; allineamento stack child
+        and qword[rbp - 64], -16
+    ) endasm
+    
+    response = sys_clone(stack_child_ptr)
+    if response < 0:
+        print("Errore nel tentativo di fare la clone()\n")
+        exit(0)
+    
+    // caso child
+    if response == 0:
+        asminline (
+            ; ripristino i registri
+            mov     rbx, qword[rbp - 56]
+            mov     rdx, qword[rbx + 0]
+            mov     rdi, qword[rbx + 8]
+            mov     rsi, qword[rbx + 16]
+            mov     r8,  qword[rbx + 24]
+            mov     r9,  qword[rbx + 32]
+            mov     r10, qword[rbx + 40]
+            mov     r11, qword[rbx + 48]
+            mov     r12, qword[rbx + 56]
+            mov     r13, qword[rbx + 64]
+            mov     r14, qword[rbx + 72]
+            mov     r15, qword[rbx + 80]
+            ; chiamo tramite ptr a funzione
+            push rdi
+            mov rdi, rbx
+            call tryc_free
+            pop rdi
+            call [rbp - 48]
+        ) endasm
+        exit(0)
+    free(stack_child_ptr)
+
+
+// ; void create_thread(void (*fn)(int, ...), arg1, arg2, arg3, ...)
+// def create_thread(func: str, args: ArgsClone) -> None:
+
+
+def sys_pid() -> int:
+    /*
+    * PID (process id) del processo corrente
+    */
+    asminline(
+        mov rax, SYS_GETPID
+        syscall
+    ) endasm
+
+
+def sys_ppid() -> int:
+    /*
+    * PID del processo padre
+    */
+    asminline(
+        mov rax, SYS_GETPPID
+        syscall
+    ) endasm
+
+
+def sys_uid() -> int:
+    /*
+    * User id del processo (chi ha lanciato il programma)
+    */
+    asminline(
+        mov rax, SYS_GETUID
+        syscall
+    ) endasm
+
+
+def sys_euid() -> int:
+    /*
+    * User id effettivo (puo' differire dal reale se il
+    * binario ha il bit setuid attivo)
+    */
+    asminline(
+        mov rax, SYS_GETEUID
+        syscall
+    ) endasm
+
+
+def sys_gid() -> int:
+    /*
+    * Group id reale del processo
+    */
+    asminline(
+        mov rax, SYS_GETGID
+        syscall
+    ) endasm
+
+
+def sys_egid() -> int:
+    /*
+    * Group id effettivo del processo (puo' differire dal reale se il
+    * binario ha il bit setgid attivo)
+    */
+    asminline(
+        mov rax, SYS_GETEGID
+        syscall
+    ) endasm
