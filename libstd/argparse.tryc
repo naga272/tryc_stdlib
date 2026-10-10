@@ -1,0 +1,1125 @@
+#include <libstd/string>
+#include <libstd/type>
+#include <libstd/list>
+#include <libstd/os>
+
+/*
+*   Standard library per il parsing degli argomenti da riga di comando
+*
+*   - opzioni lunghe/corte (--nome/-n), con o senza valore
+*   - valori di default e opzioni obbligatorie
+*   - argomenti posizionali (globali e per sottocomando)
+*   - --help/-h flag obbligatorio
+*   - messagi di errore per opzioni sconosciute/obbligatorie mancanti
+*
+*   Dopo "--" ogni argomento e' posizionale, anche se inizia con '-'.
+*   Le opzioni non prendono come valori gli argomenti che iniziano con '-',
+*   escluso nel caso di un numero negativo (es. "--n -5").
+*
+*   esempio uso:
+*       p = ArgParser("lorem ipsum", "description")
+*       p.add("--name", "-n", "lorem ipsum", 1, "")
+*       p.add_flag("--verbose", "-v", "output details")
+*       p.parse()
+*       nome = p.get("--name")
+*       if p.get_bool("--verbose"):
+*           print("descrizione aggiuntiva\n")
+*
+*   Con sottocomandi:
+*       p = ArgParser("tool", "gestisce cose")
+*       commit_id = p.add_subcommand("commit", "registra un commit")
+*       p.add_sub(commit_id, "--message", "-m", "messaggio", 1, "")
+*       p.add_sub_positional(commit_id, "file", "file da includere")
+*       p.parse()
+*       if p.subcommand() == "commit":
+*           print(p.get("--message") + "\n")
+*
+*   Due parser sulla stessa riga di comando (es. "tool -v --name x"):
+*       log = ArgParser("tool", "")
+*       log.add_flag("--verbose", "-v", "output dettagliato")
+*       log.parse_known()               // --name e x restano a parte
+*       app = ArgParser("tool", "")
+*       app.add("--name", "-n", "un nome", 0, "")
+*       app.parse_known()               // -v resta a parte
+*
+*   TODO: Nel caso in cui non si hanno bisogno di più istanze,
+*   le funzioni argparse_* in fondo al file fanno le stesse
+*   cose su un parser unico del programma
+*/
+
+#ifndef ARGPARSE_NO_OWNER
+#define ARGPARSE_NO_OWNER -1
+#endif
+
+#ifndef ARGPARSE_KIND_VALUE
+#define ARGPARSE_KIND_VALUE 0
+#endif
+
+#ifndef ARGPARSE_KIND_FLAG
+#define ARGPARSE_KIND_FLAG  1
+#endif
+
+// che cosa e' un argomento della riga di comando (ArgParserArg.kind)
+#define ARGPARSE_ARG_POSITIONAL 0       // anche ogni argomento dopo "--" e i numeri negativi
+#define ARGPARSE_ARG_OPTION 1           // inizia con '-'
+#define ARGPARSE_ARG_SEPARATOR 2        // il primo "--"
+#define ARGPARSE_ARG_HELP 3             // --help o -h
+
+
+/* cache argomenti */
+
+/*
+* Si analizza un argomento una volta sola per tutte le istanze.
+* - @text (una copia con header, la lunghezza costa O(1)),
+* - tipo ARGPARSE_ARG_*, e per un'opzione il nome prima di '='
+* - @value dopo ("" e @has_value 0 se non c'e' '=')
+*/
+class ArgParserArg:
+    text str
+    kind int
+    name str
+    value str
+    has_value int
+
+
+// gli argomenti analizzati, in ordine di argv; validi se _ap_args_ready
+_ap_args = list_new()
+_ap_args_count = 0
+_ap_args_ready = 0
+// il nome del programma: argv[0] senza cartella
+_ap_program = ""
+
+
+def argparser_is_negative_number(text: str) -> int:
+    /*
+    * Controlla se un argomento e' un numero negativo ("-5", "-0.5", "-.5"),
+    * cioe' un valore e non un'opzione.
+    * argomenti:
+    *   text: l'argomento
+    * return: 1 se lo e', 0 altrimenti
+    */
+    length = strlen(text)
+    if length < 2 or text[0] != '-':
+        return 0
+
+    digits = 0
+    dots = 0
+    idx = 1 as long
+
+    while idx < length:
+        if text[idx] == '.':
+            dots++
+        elif isnumeric(text[idx]):
+            digits++
+        else:
+            return 0
+        idx++
+
+    if digits > 0 and dots <= 1:
+        return 1
+
+    return 0
+
+
+def argparser_parse_arg(text: str, after_separator: int) -> ArgParserArg:
+    /*
+    * Analizza un argomento della riga di comando: il tipo (ARGPARSE_ARG_*) e,
+    * per un'opzione "--nome=valore", nome e valore.
+    * argomenti:
+    *   text: l'argomento
+    *   after_separator: 1 se viene dopo il primo "--"
+    * return: l'argomento analizzato
+    */
+    arg = new ArgParserArg()
+    arg.text = text
+    arg.name = text
+    arg.value = ""
+    arg.has_value = 0
+    arg.kind = ARGPARSE_ARG_POSITIONAL
+
+    if after_separator == 1:
+        return arg
+
+    if text == "--":
+        arg.kind = ARGPARSE_ARG_SEPARATOR
+        return arg
+
+    if text[0] != '-' or argparser_is_negative_number(text):
+        return arg
+
+    arg.kind = ARGPARSE_ARG_OPTION
+    length = strlen(text)
+    eq = 0 as long
+
+    while eq < length and text[eq] != '=':
+        eq++
+
+    if eq < length:
+        arg.name = substrget(text, eq)
+        arg.value = substrget(text + eq + 1, length - eq - 1)
+        arg.has_value = 1
+
+    if arg.name == "--help" or arg.name == "-h":
+        arg.kind = ARGPARSE_ARG_HELP
+
+    return arg
+
+
+inline def argparser_elaborate_cache() -> int:
+    /*
+    * Analizza una volta per tutte gli argomenti del processo e ricava il
+    * nome del programma (argv[0] senza cartella).
+    * return: il numero di argomenti
+    */
+    after_separator = 0
+    max_num_arg = arg_count()
+    for i = 0; i < max_num_arg; i++:
+        unsafe:
+            text = str_from_c(arg_at(i) as ptr char)
+
+        arg = argparser_parse_arg(text, after_separator)
+        if arg.kind == ARGPARSE_ARG_SEPARATOR:
+            after_separator = 1
+
+        list_push(_ap_args, arg)
+
+    _ap_args_count = max_num_arg
+
+    if _ap_args_count < 0:
+        _ap_args_ready = 1
+        return _ap_args_count
+
+    first = argparser_arg_at(0)
+    start = 0 as long
+    idx = 0 as long
+
+    for idx = 0 as long; first.text[idx] != '\0'; idx++:
+        ch_text = first.text[idx]
+        if ch_text == '/' or ch_text == '\\':
+            start = idx + 1
+
+    _ap_program = substrget(first.text + start, strlen(first.text) - start)
+
+    _ap_args_ready = 1
+    return _ap_args_count
+
+
+def argparser_args() -> int:
+    /*
+    * Restituisce il numero di argomenti del processo; alla prima chiamata li
+    * analizza.
+    * return: il numero di argomenti
+    */
+    if _ap_args_ready == 1:
+        return _ap_args_count
+
+    return argparser_elaborate_cache()
+
+
+def argparser_arg_at(index: int) -> ArgParserArg:
+    /*
+    * Restituisce un argomento gia' analizzato (dopo argparser_args).
+    * argomenti:
+    *   index: la posizione, da 0
+    * return: l'argomento
+    */
+    return list_get(_ap_args, index as long) as ArgParserArg
+
+
+/*
+* registrazione opzione: 
+* - forma lunga e corta
+* - testo di help
+* - default
+* - valore dopo il parse
+* - ARGPARSE_KIND_VALUE
+* - ARGPARSE_KIND_FLAG
+* - se e' obbligatoria,
+* - se era sulla riga di comando
+* sottocomando a cui appartiene (ARGPARSE_NO_OWNER se vale sempre)
+*/
+class ArgParserOption:
+    long_flag str
+    short_flag str
+    help str
+    default_value str
+    value str
+    kind int
+    required int
+    provided int
+    owner int
+
+
+/*
+* Gestione argomento posizionale:
+* - nome
+* - help
+* - valore dopo il parse
+* - sottocomando
+*/
+class ArgParserPositional:
+    name str
+    help str
+    value str
+    owner int
+
+
+// un sottocomando: nome sulla riga di comando e help
+class ArgParserCommand:
+    name str
+    help str
+
+
+/*
+* Lo stato di un parser e i suoi metodi.
+* matched_sub e' il sottocomando riconosciuto
+* dall'ultimo parse (ARGPARSE_NO_OWNER se nessuno),
+* unknown gli argomenti che parse_known ha messo da parte
+*/
+class ArgParser:
+    prog str
+    description str
+    options List
+    positionals List
+    commands List
+    unknown List
+    option_count int
+    positional_count int
+    command_count int
+    unknown_count int
+    matched_sub int
+    add &argparser_add
+    add_flag &argparser_add_flag
+    add_positional &argparser_add_positional
+    add_subcommand &argparser_add_subcommand
+    add_sub &argparser_add_sub
+    add_sub_flag &argparser_add_sub_flag
+    add_sub_positional &argparser_add_sub_positional
+    parse &argparser_parse
+    parse_known &argparser_parse_known
+    unknown_at &argparser_unknown_at
+    print_help &argparser_print_help
+    get &argparser_get
+    get_int &argparser_get_int
+    get_bool &argparser_get_bool
+    was_provided &argparser_was_provided
+    get_positional &argparser_get_positional
+    subcommand &argparser_subcommand
+
+
+
+/* CREAZIONE */
+
+inline def argparser_reset(self: ArgParser, prog: str, description: str) -> None:
+    /*
+    * Riporta il parser vuoto, senza opzioni ne' valori.
+    * argomenti:
+    *   self: il parser
+    *   prog: il nome del programma
+    *   description: la descrizione mostrata da --help
+    * return: nessuno (procedura)
+    */
+    self.prog = prog
+    self.description = description
+    self.options.cap = 0 as long
+    self.options.length = 0 as long
+    self.positionals.cap = 0 as long
+    self.positionals.length = 0 as long
+    self.commands.cap = 0 as long
+    self.commands.length = 0 as long
+    self.unknown.cap = 0 as long
+    self.unknown.length = 0 as long
+    self.option_count = 0
+    self.positional_count = 0
+    self.command_count = 0
+    self.unknown_count = 0
+    self.matched_sub = ARGPARSE_NO_OWNER
+
+
+def ArgParser(prog: str, description: str) -> ArgParser:
+    /*
+    * Crea un parser vuoto.
+    * argomenti:
+    *   prog: il nome del programma nei messaggi, "" per argv[0] senza cartella
+    *   description: la descrizione mostrata da --help
+    * return: il parser
+    */
+    p = new ArgParser()
+    argparser_reset(p, prog, description)
+    return p
+
+
+/* REGISTRAZIONE */
+
+inline def argparser_add_sub(self: ArgParser, sub_id: int, long_flag: str, short_flag: str, help_text: str, required: int, default_value: str) -> int:
+    /*
+    * Registra un'opzione con un valore ("--name Mario" o "--name=Mario"),
+    * valida solo con il sottocomando sub_id.
+    * argomenti:
+    *   sub_id: l'id di add_subcommand, ARGPARSE_NO_OWNER per tutti
+    *   long_flag: la forma lunga, es. "--name"
+    *   short_flag: la forma corta, es. "-n", "" se non c'e'
+    *   help_text: il testo mostrato da --help
+    *   required: 1 se l'opzione e' obbligatoria
+    *   default_value: il valore quando l'opzione manca
+    * return: l'indice dell'opzione
+    */
+    opt = new ArgParserOption()
+    opt.long_flag = long_flag
+    opt.short_flag = short_flag
+    opt.help = help_text
+    opt.default_value = default_value
+    opt.value = default_value
+    opt.kind = ARGPARSE_KIND_VALUE
+    opt.required = required
+    opt.provided = 0
+    opt.owner = sub_id
+    list_push(self.options, opt)
+    self.option_count = self.option_count + 1
+    return self.option_count - 1
+
+
+def argparser_add(self: ArgParser, long_flag: str, short_flag: str, help_text: str, required: int, default_value: str) -> int:
+    /*
+    * Registra un'opzione con un valore, valida con qualunque sottocomando.
+    * argomenti:
+    *   long_flag: la forma lunga, es. "--name"
+    *   short_flag: la forma corta, es. "-n", "" se non c'e'
+    *   help_text: il testo mostrato da --help
+    *   required: 1 se l'opzione e' obbligatoria
+    *   default_value: il valore quando l'opzione manca
+    * return: l'indice dell'opzione
+    */
+    return argparser_add_sub(self, ARGPARSE_NO_OWNER, long_flag, short_flag, help_text, required, default_value)
+
+
+def argparser_add_sub_flag(self: ArgParser, sub_id: int, long_flag: str, short_flag: str, help_text: str) -> int:
+    /*
+    * Registra un'opzione senza valore (es. "--verbose"), valida solo con il
+    * sottocomando sub_id.
+    * argomenti:
+    *   sub_id: l'id di add_subcommand, ARGPARSE_NO_OWNER per tutti
+    *   long_flag: la forma lunga, es. "--name"
+    *   short_flag: la forma corta, es. "-n", "" se non c'e'
+    *   help_text: il testo mostrato da --help
+    * return: l'indice dell'opzione
+    */
+    idx = argparser_add_sub(self, sub_id, long_flag, short_flag, help_text, 0, "0")
+    opt = argparser_option_at(self, idx)
+    opt.kind = ARGPARSE_KIND_FLAG
+    return idx
+
+
+def argparser_add_flag(self: ArgParser, long_flag: str, short_flag: str, help_text: str) -> int:
+    /*
+    * Registra un'opzione senza valore (es. "--verbose"), valida con
+    * qualunque sottocomando.
+    * argomenti:
+    *   long_flag: la forma lunga, es. "--name"
+    *   short_flag: la forma corta, es. "-n", "" se non c'e'
+    *   help_text: il testo mostrato da --help
+    * return: l'indice dell'opzione
+    */
+    return argparser_add_sub_flag(self, ARGPARSE_NO_OWNER, long_flag, short_flag, help_text)
+
+
+def argparser_add_sub_positional(self: ArgParser, sub_id: int, name: str, help_text: str) -> int:
+    /*
+    * Registra un argomento posizionale, riconosciuto dalla posizione
+    * nell'ordine di registrazione, valido solo con il sottocomando sub_id.
+    * argomenti:
+    *   sub_id: l'id di add_subcommand, ARGPARSE_NO_OWNER per tutti
+    *   name: il nome, per get_positional e i messaggi
+    *   help_text: il testo mostrato da --help
+    * return: l'indice del posizionale
+    */
+    pos = new ArgParserPositional()
+    pos.name = name
+    pos.help = help_text
+    pos.value = ""
+    pos.owner = sub_id
+    list_push(self.positionals, pos)
+    self.positional_count = self.positional_count + 1
+    return self.positional_count - 1
+
+
+def argparser_add_positional(self: ArgParser, name: str, help_text: str) -> int:
+    /*
+    * Registra un argomento posizionale valido con qualunque sottocomando.
+    * argomenti:
+    *   name: il nome, per get_positional e i messaggi
+    *   help_text: il testo mostrato da --help
+    * return: l'indice del posizionale
+    */
+    return argparser_add_sub_positional(self, ARGPARSE_NO_OWNER, name, help_text)
+
+
+def argparser_add_subcommand(self: ArgParser, name: str, help_text: str) -> int:
+    /*
+    * Registra un sottocomando (es. "commit" in "tool commit -m ..."),
+    * riconosciuto come il primo argomento che non e' un'opzione.
+    * argomenti:
+    *   name: il nome, come si scrive sulla riga di comando
+    *   help_text: la descrizione mostrata da --help
+    * return: l'id, per add_sub, add_sub_flag e add_sub_positional
+    */
+    cmd = new ArgParserCommand()
+    cmd.name = name
+    cmd.help = help_text
+    list_push(self.commands, cmd)
+    self.command_count = self.command_count + 1
+    return self.command_count - 1
+
+
+def argparser_option_at(self: ArgParser, idx: int) -> ArgParserOption:
+    /*
+    * Restituisce un'opzione registrata.
+    * argomenti:
+    *   self: il parser
+    *   idx: l'indice dell'opzione
+    * return: l'opzione
+    */
+    return list_get(self.options, idx as long) as ArgParserOption
+
+
+def argparser_positional_at(self: ArgParser, idx: int) -> ArgParserPositional:
+    /*
+    * Restituisce un posizionale registrato.
+    * argomenti:
+    *   self: il parser
+    *   idx: l'indice del posizionale
+    * return: il posizionale
+    */
+    return list_get(self.positionals, idx as long) as ArgParserPositional
+
+
+def argparser_command_at(self: ArgParser, idx: int) -> ArgParserCommand:
+    /*
+    * Restituisce un sottocomando registrato.
+    * argomenti:
+    *   self: il parser
+    *   idx: l'id del sottocomando
+    * return: il sottocomando
+    */
+    return list_get(self.commands, idx as long) as ArgParserCommand
+
+
+def argparser_applies(self: ArgParser, owner: int) -> int:
+    /*
+    * Controlla se un'opzione o un posizionale vale adesso: sempre se non ha
+    * sottocomando, altrimenti solo con il sottocomando riconosciuto.
+    * argomenti:
+    *   self: il parser
+    *   owner: il sottocomando a cui appartiene
+    * return: 1 se vale, 0 altrimenti
+    */
+    if (owner == ARGPARSE_NO_OWNER or
+            owner == self.matched_sub):
+        return 1
+
+    return 0
+
+
+def argparser_prog(self: ArgParser) -> str:
+    /*
+    * Restituisce il nome del programma per i messaggi: prog, oppure argv[0]
+    * senza cartella se prog e' "".
+    * argomenti:
+    *   self: il parser
+    * return: il nome
+    */
+    if self.prog != "":
+        return self.prog
+
+    argparser_args()
+    return _ap_program
+
+
+def argparser_find_option(self: ArgParser, long_flag: str) -> int:
+    /*
+    * Cerca un'opzione per forma lunga.
+    * argomenti:
+    *   self: il parser
+    *   long_flag: la forma lunga
+    * return: l'indice, -1 se non e' registrata
+    */
+    for idx = 0; idx < self.option_count; idx++:
+        opt = argparser_option_at(self, idx)
+        if opt.long_flag == long_flag:
+            return idx
+
+    return -1
+
+
+def argparser_find_subcommand(self: ArgParser, name: str) -> int:
+    /*
+    * Cerca un sottocomando per nome.
+    * argomenti:
+    *   self: il parser
+    *   name: il nome
+    * return: l'id, -1 se non e' registrato
+    */
+    for idx = 0; idx < self.command_count; idx++:
+        cmd = argparser_command_at(self, idx)
+        if cmd.name == name:
+            return idx
+    return -1
+
+
+def argparser_next_positional(self: ArgParser, from_idx: int) -> int:
+    /*
+    * Cerca, da from_idx in poi, il prossimo posizionale che vale adesso
+    * (globale o del sottocomando riconosciuto).
+    * argomenti:
+    *   self: il parser
+    *   from_idx: l'indice da cui cercare
+    * return: l'indice, -1 se non ce ne sono
+    */
+    for idx = from_idx; idx < self.positional_count; idx++:
+        pos = argparser_positional_at(self, idx)
+        if argparser_applies(self, pos.owner):
+            return idx
+    return -1
+
+
+def argparser_fail(self: ArgParser, message: str) -> None:
+    /*
+    * Stampa un messaggio d'errore e l'help, poi termina il programma con 1.
+    * argomenti:
+    *   self: il parser
+    *   message: il messaggio
+    * return: nessuno (procedura)
+    */
+    print(argparser_prog(self) + ": " + message + "\n")
+    argparser_print_help(self)
+    exit(1)
+
+
+/* HELP */
+
+def argparser_print_one_help(opt: ArgParserOption) -> int:
+    /*
+    * Stampa la riga di help di un'opzione.
+    * argomenti:
+    *   opt: l'opzione
+    * return: 0
+    */
+    print("  " + opt.long_flag)
+    if opt.short_flag != "":
+        print(", " + opt.short_flag)
+
+    print("\t" + opt.help)
+
+    if opt.required:
+        print(" (obbligatorio)")
+
+    print("\n")
+    return 0
+
+
+def argparser_print_help(self: ArgParser) -> int:
+    /*
+    * Stampa uso, descrizione, sottocomandi e opzioni, anche quelle del
+    * sottocomando riconosciuto. parse la chiama per --help, -h e sugli errori.
+    * return: 0
+    */
+    print("uso: " + argparser_prog(self))
+    if self.command_count > 0:
+        print(" <comando>")
+
+    for idx = 0; idx < self.option_count; idx++:
+        opt = argparser_option_at(self, idx)
+        if opt.owner == ARGPARSE_NO_OWNER:
+            print(" [" + opt.long_flag + "]")
+
+    for idx = 0; idx < self.positional_count; idx++:
+        pos = argparser_positional_at(self, idx)
+        if pos.owner == ARGPARSE_NO_OWNER:
+            print(" " + pos.name)
+
+    print("\n")
+
+    if self.description != "":
+        print("\n" + self.description + "\n")
+
+    if self.command_count > 0:
+        print("\ncomandi:\n")
+        idx = 0
+        while idx < self.command_count:
+            cmd = argparser_command_at(self, idx)
+            print("  " + cmd.name + "\t" + cmd.help + "\n")
+            idx++
+
+    print("\nopzioni:\n  --help, -h\tmostra questo messaggio\n")
+    for idx = 0; idx < self.option_count; idx++:
+        opt = argparser_option_at(self, idx)
+        if opt.owner == ARGPARSE_NO_OWNER:
+            argparser_print_one_help(opt)
+
+    if self.matched_sub != ARGPARSE_NO_OWNER:
+        cmd = argparser_command_at(self, self.matched_sub)
+        print("\nopzioni per '" + cmd.name + "':\n")
+
+        for idx = 0; idx < self.option_count; idx++:
+            opt = argparser_option_at(self, idx)
+            if opt.owner == self.matched_sub:
+                argparser_print_one_help(opt)
+
+    return 0
+
+
+/* PARSING */
+
+def argparser_match_and_consume(self: ArgParser, arg: ArgParserArg, i: int) -> int:
+    /*
+    * Cerca l'opzione che combacia con un argomento e ne legge il valore, da
+    * "--flag=valore" o dall'argomento successivo.
+    * argomenti:
+    *   self: il parser
+    *   arg: l'argomento, di tipo ARGPARSE_ARG_OPTION
+    *   i: il suo indice in argv
+    * return: l'indice da cui ripartire (i + 1, o i + 2 se il valore era
+    *   l'argomento dopo), -1 se nessuna opzione combacia
+    */
+    for idx = 0; idx < self.option_count; idx++:
+        opt = argparser_option_at(self, idx)
+
+        if not argparser_applies(self, opt.owner):
+            continue
+
+        if arg.name == opt.long_flag or (opt.short_flag != "" and arg.name == opt.short_flag):
+            opt.provided = 1
+
+            if opt.kind == ARGPARSE_KIND_FLAG:
+                if arg.has_value == 1:
+                    argparser_fail(self, arg.name + " non vuole un valore")
+
+                opt.value = "1"
+                return i + 1
+
+            if arg.has_value == 1:
+                opt.value = arg.value
+                return i + 1
+
+            if i + 1 >= _ap_args_count:
+                argparser_fail(self, "manca il valore per " + arg.text)
+
+            next_arg = argparser_arg_at(i + 1)
+            if next_arg.kind != ARGPARSE_ARG_POSITIONAL:
+                argparser_fail(self, "manca il valore per " + arg.text)
+
+            opt.value = next_arg.text
+            return i + 2
+    return -1
+
+
+def argparser_clear_values(self: ArgParser) -> None:
+    /*
+    * Riporta ai default i valori di opzioni e posizionali, prima di un
+    * parse.
+    * argomenti:
+    *   self: il parser
+    * return: nessuno (procedura)
+    */
+    self.matched_sub = ARGPARSE_NO_OWNER
+    list_clear(self.unknown)
+    self.unknown_count = 0
+    for idx = 0; idx < self.option_count; idx++:
+        opt = argparser_option_at(self, idx)
+        opt.value = opt.default_value
+        opt.provided = 0
+
+    for idx = 0; idx < self.positional_count; idx++:
+        pos = argparser_positional_at(self, idx)
+        pos.value = ""
+
+
+inline def argparser_put_aside(self: ArgParser, text: str) -> None:
+    /*
+    * Mette da parte un argomento che non e' di questo parser (parse_known).
+    * argomenti:
+    *   self: il parser
+    *   text: l'argomento
+    * return: nessuno (procedura)
+    */
+    list_push(self.unknown, text)
+    self.unknown_count = self.unknown_count + 1
+
+
+def argparser_parse_args(self: ArgParser, known_only: int) -> int:
+    /*
+    * Analizza la riga di comando, per parse e parse_known.
+    * argomenti:
+    *   self: il parser
+    *   known_only: 1 per parse_known, che mette da parte le opzioni
+    *     sconosciute e i posizionali in eccesso invece di dare errore
+    * return: 0
+    */
+    count = argparser_args()
+    argparser_clear_values(self)
+    i = 1
+    next_pos = 0
+    subcommand_locked = 0
+    if self.command_count == 0:
+        subcommand_locked = 1
+
+    while i < count:
+        arg = argparser_arg_at(i)
+
+        if arg.kind == ARGPARSE_ARG_SEPARATOR:
+            i++
+            continue
+
+        if arg.kind == ARGPARSE_ARG_OPTION:
+            next_i = argparser_match_and_consume(self, arg, i)
+            if next_i >= 0:
+                i = next_i
+            elif known_only == 1:
+                argparser_put_aside(self, arg.text)
+                i++
+            else:
+                argparser_fail(self, "opzione sconosciuta: " + arg.text)
+            continue
+
+        if subcommand_locked == 0:
+            sub_id = argparser_find_subcommand(self, arg.text)
+            if sub_id < 0:
+                argparser_fail(self, "comando sconosciuto: " + arg.text)
+            self.matched_sub = sub_id
+            subcommand_locked = 1
+            i++
+            continue
+
+        slot = argparser_next_positional(self, next_pos)
+        if slot >= 0:
+            pos = argparser_positional_at(self, slot)
+            pos.value = arg.text
+            next_pos = slot + 1
+        elif known_only == 1:
+            argparser_put_aside(self, arg.text)
+        else:
+            argparser_fail(self, "argomento in eccesso: " + arg.text)
+
+        if arg.kind == ARGPARSE_ARG_HELP:
+            argparser_print_help(self)
+            exit(0)
+        i++
+
+    for idx = 0; idx < self.option_count; idx++:
+        opt = argparser_option_at(self, idx)
+        if (argparser_applies(self, opt.owner) and
+                opt.required and
+                opt.provided == 0):
+            argparser_fail(self, "opzione obbligatoria mancante: " + opt.long_flag)
+
+    missing = argparser_next_positional(self, next_pos)
+    if missing == -1:
+        return 0
+
+    pos = argparser_positional_at(self, missing)
+    argparser_fail(self, "argomento posizionale mancante: " + pos.name)
+    return 0
+
+
+def argparser_parse(self: ArgParser) -> int:
+    /*
+    * Analizza la riga di comando con le opzioni, i posizionali e i
+    * sottocomandi registrati. Su un errore stampa il messaggio e l'help e
+    * termina con 1; con --help o -h (prima di "--") stampa l'help e termina
+    * con 0.
+    * return: 0
+    */
+    return argparser_parse_args(self, 0)
+
+
+def argparser_parse_known(self: ArgParser) -> int:
+    /*
+    * Come parse, ma le opzioni sconosciute e i posizionali in eccesso non
+    * sono errori: finiscono fra gli argomenti messi da parte (unknown_count,
+    * unknown_at), per un altro parser. Restano errori un comando
+    * sconosciuto, un valore mancante e un'opzione obbligatoria assente.
+    * return: 0
+    */
+    return argparser_parse_args(self, 1)
+
+
+def argparser_unknown_at(self: ArgParser, idx: int) -> str:
+    /*
+    * Restituisce un argomento messo da parte da parse_known.
+    * argomenti:
+    *   idx: da 0 a unknown_count - 1
+    * return: l'argomento
+    */
+    return list_get(self.unknown, idx as long) as str
+
+
+/* LETTURA VALORI */
+
+def argparser_get(self: ArgParser, long_flag: str) -> str:
+    /*
+    * Restituisce il valore di un'opzione dopo parse: il default se non era
+    * sulla riga di comando.
+    * argomenti:
+    *   long_flag: la forma lunga, es. "--name"
+    * return: il valore, "" se l'opzione non e' registrata
+    */
+    idx = argparser_find_option(self, long_flag)
+    if idx == -1:
+        return ""
+
+    opt = argparser_option_at(self, idx)
+    return opt.value
+
+
+def argparser_get_int(self: ArgParser, long_flag: str) -> int:
+    /*
+    * Come get, convertito in intero.
+    * argomenti:
+    *   long_flag: la forma lunga
+    * return: il valore, 0 se non e' un numero o l'opzione non c'e'
+    */
+    return str_to_int(argparser_get(self, long_flag))
+
+
+def argparser_was_provided(self: ArgParser, long_flag: str) -> int:
+    /*
+    * Controlla se un'opzione era sulla riga di comando.
+    * argomenti:
+    *   long_flag: la forma lunga
+    * return: 1 se c'era, 0 altrimenti
+    */
+    idx = argparser_find_option(self, long_flag)
+    if idx == -1:
+        return 0
+
+    opt = argparser_option_at(self, idx)
+    return opt.provided
+
+
+def argparser_get_bool(self: ArgParser, long_flag: str) -> int:
+    /*
+    * Controlla se un'opzione senza valore (add_flag) era sulla riga di
+    * comando.
+    * argomenti:
+    *   long_flag: la forma lunga
+    * return: 1 se c'era, 0 altrimenti
+    */
+    return argparser_was_provided(self, long_flag)
+
+
+def argparser_get_positional(self: ArgParser, name: str) -> str:
+    /*
+    * Restituisce il valore di un posizionale dopo parse.
+    * argomenti:
+    *   name: il nome con cui e' stato registrato
+    * return: il valore, "" se non e' stato passato o non e' registrato
+    */
+    for idx = 0; idx < self.positional_count; idx++:
+        pos = argparser_positional_at(self, idx)
+        if pos.name != name:
+            continue
+
+        return pos.value
+
+    return ""
+
+
+def argparser_subcommand(self: ArgParser) -> str:
+    /*
+    * Restituisce il sottocomando riconosciuto dall'ultimo parse.
+    * return: il nome, "" se nessuno
+    */
+    if self.matched_sub == ARGPARSE_NO_OWNER:
+        return ""
+
+    cmd = argparser_command_at(self, self.matched_sub)
+    return cmd.name
+
+
+/* CASO UN SOLO PARSER PER PROGRAMMA */
+
+/*
+* Le foo argparse_* sono le stesse operazioni su un ArgParser
+* con la differenza che non si creano istanze:
+*   argparse_init("mytool", "fa cose utili")
+*   argparse_add("--name", "-n", "il tuo nome", 1, "")
+*   argparse_parse()
+*   nome = argparse_get("--name")
+*/
+
+_ap_default = ArgParser("", "")
+
+
+def argparse_init(prog: str, description: str) -> int:
+    /*
+    * Azzera il parser unico del programma; va chiamata prima delle
+    * argparse_add*.
+    * argomenti:
+    *   prog: il nome del programma, "" per argv[0] senza cartella
+    *   description: la descrizione mostrata da --help
+    * return: 0
+    */
+    argparser_reset(_ap_default, prog, description)
+    return 0
+
+
+def argparse_add(long_flag: str, short_flag: str, help_text: str, required: int, default_value: str) -> int:
+    /*
+    * Come ArgParser.add, sul parser unico del programma.
+    * argomenti:
+    *   long_flag: la forma lunga, es. "--name"
+    *   short_flag: la forma corta, es. "-n", "" se non c'e'
+    *   help_text: il testo mostrato da --help
+    *   required: 1 se l'opzione e' obbligatoria
+    *   default_value: il valore quando l'opzione manca
+    * return: l'indice dell'opzione
+    */
+    return argparser_add(_ap_default, long_flag, short_flag, help_text, required, default_value)
+
+
+def argparse_add_flag(long_flag: str, short_flag: str, help_text: str) -> int:
+    /*
+    * Come ArgParser.add_flag, sul parser unico del programma.
+    * argomenti:
+    *   long_flag: la forma lunga, es. "--name"
+    *   short_flag: la forma corta, es. "-n", "" se non c'e'
+    *   help_text: il testo mostrato da --help
+    * return: l'indice dell'opzione
+    */
+    return argparser_add_flag(_ap_default, long_flag, short_flag, help_text)
+
+
+def argparse_add_positional(name: str, help_text: str) -> int:
+    /*
+    * Come ArgParser.add_positional, sul parser unico del programma.
+    * argomenti:
+    *   name: il nome
+    *   help_text: il testo mostrato da --help
+    * return: l'indice del posizionale
+    */
+    return argparser_add_positional(_ap_default, name, help_text)
+
+
+def argparse_add_subcommand(name: str, help_text: str) -> int:
+    /*
+    * Come ArgParser.add_subcommand, sul parser unico del programma.
+    * argomenti:
+    *   name: il nome
+    *   help_text: la descrizione mostrata da --help
+    * return: l'id del sottocomando
+    */
+    return argparser_add_subcommand(_ap_default, name, help_text)
+
+
+def argparse_add_sub(sub_id: int, long_flag: str, short_flag: str, help_text: str, required: int, default_value: str) -> int:
+    /*
+    * Come ArgParser.add_sub, sul parser unico del programma.
+    * argomenti:
+    *   sub_id: l'id di argparse_add_subcommand
+    *   long_flag: la forma lunga, es. "--name"
+    *   short_flag: la forma corta, es. "-n", "" se non c'e'
+    *   help_text: il testo mostrato da --help
+    *   required: 1 se l'opzione e' obbligatoria
+    *   default_value: il valore quando l'opzione manca
+    * return: l'indice dell'opzione
+    */
+    return argparser_add_sub(_ap_default, sub_id, long_flag, short_flag, help_text, required, default_value)
+
+
+def argparse_add_sub_flag(sub_id: int, long_flag: str, short_flag: str, help_text: str) -> int:
+    /*
+    * Come ArgParser.add_sub_flag, sul parser unico del programma.
+    * argomenti:
+    *   sub_id: l'id di argparse_add_subcommand
+    *   long_flag: la forma lunga, es. "--name"
+    *   short_flag: la forma corta, es. "-n", "" se non c'e'
+    *   help_text: il testo mostrato da --help
+    * return: l'indice dell'opzione
+    */
+    return argparser_add_sub_flag(_ap_default, sub_id, long_flag, short_flag, help_text)
+
+
+def argparse_add_sub_positional(sub_id: int, name: str, help_text: str) -> int:
+    /*
+    * Come ArgParser.add_sub_positional, sul parser unico del programma.
+    * argomenti:
+    *   sub_id: l'id di argparse_add_subcommand
+    *   name: il nome
+    *   help_text: il testo mostrato da --help
+    * return: l'indice del posizionale
+    */
+    return argparser_add_sub_positional(_ap_default, sub_id, name, help_text)
+
+
+def argparse_parse() -> int:
+    /*
+    * Come ArgParser.parse, sul parser unico del programma.
+    * return: 0
+    */
+    return argparser_parse(_ap_default)
+
+
+def argparse_print_help() -> int:
+    /*
+    * Come ArgParser.print_help, sul parser unico del programma.
+    * return: 0
+    */
+    return argparser_print_help(_ap_default)
+
+
+def argparse_get(long_flag: str) -> str:
+    /*
+    * Come ArgParser.get, sul parser unico del programma.
+    * argomenti:
+    *   long_flag: la forma lunga
+    * return: il valore
+    */
+    return argparser_get(_ap_default, long_flag)
+
+
+def argparse_get_int(long_flag: str) -> int:
+    /*
+    * Come ArgParser.get_int, sul parser unico del programma.
+    * argomenti:
+    *   long_flag: la forma lunga
+    * return: il valore
+    */
+    return argparser_get_int(_ap_default, long_flag)
+
+
+def argparse_get_bool(long_flag: str) -> int:
+    /*
+    * Come ArgParser.get_bool, sul parser unico del programma.
+    * argomenti:
+    *   long_flag: la forma lunga
+    * return: 1 se l'opzione c'era, 0 altrimenti
+    */
+    return argparser_get_bool(_ap_default, long_flag)
+
+
+def argparse_was_provided(long_flag: str) -> int:
+    /*
+    * Come ArgParser.was_provided, sul parser unico del programma.
+    * argomenti:
+    *   long_flag: la forma lunga
+    * return: 1 se l'opzione c'era, 0 altrimenti
+    */
+    return argparser_was_provided(_ap_default, long_flag)
+
+
+def argparse_get_positional(name: str) -> str:
+    /*
+    * Come ArgParser.get_positional, sul parser unico del programma.
+    * argomenti:
+    *   name: il nome del posizionale
+    * return: il valore
+    */
+    return argparser_get_positional(_ap_default, name)
+
+
+def argparse_matched_subcommand() -> str:
+    /*
+    * Come ArgParser.subcommand, sul parser unico del programma.
+    * return: il nome del sottocomando, "" se nessuno
+    */
+    return argparser_subcommand(_ap_default)

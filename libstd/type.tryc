@@ -1,0 +1,309 @@
+/*
+* Conversioni fra i tipi base. Non include nessun'altra libreria, cosi'
+* ogni modulo la puo' usare.
+*
+* 'as' converte quando non perde niente (int -> long, char -> int) e fra
+* interi e float (il float verso un intero e' troncato verso lo zero), ma
+* non restringe mai un intero: qui ci sono le conversioni che tagliano i
+* bit alti, il testo letto come numero, le cifre e l'esadecimale. Da
+* numero a testo ci sono gia' itoa(long) e ftoa(float), nel compilatore.
+*/
+
+
+/*  FRA INTERI */
+
+def char_to_int(c: char) -> int:
+    /*
+    * Restituisce il codice di un carattere.
+    * argomenti:
+    *   c: il carattere
+    * return: il codice, da 0 a 255
+    */
+    return c as int
+
+
+def int_to_char(x: int) -> char:
+    /*
+    * Restituisce il carattere con codice x, tenendone gli 8 bit bassi come il
+    * cast (char) del C.
+    * argomenti:
+    *   x: il codice
+    * return: il carattere
+    */
+    unsafe:
+        low = &x as ptr char
+        return low[0]
+
+
+def long_to_int(x: long) -> int:
+    /*
+    * Restituisce i 32 bit bassi di x, come il cast (int) del C.
+    * argomenti:
+    *   x: il valore
+    * return: i 32 bit bassi, con il loro segno
+    */
+    unsafe:
+        low = &x as ptr int
+        return low[0]
+
+
+/* CIFRE */
+
+def char_to_digit(c: char) -> int:
+    /*
+    * Restituisce il valore di una cifra decimale ('7' -> 7).
+    * argomenti:
+    *   c: il carattere
+    * return: da 0 a 9, -1 se c non e' una cifra
+    */
+    v = c as int
+    if v < 48 or v > 57:
+        return -1
+    return v - 48
+
+
+def hex_digit_value(c: char) -> int:
+    /*
+    * Restituisce il valore di una cifra esadecimale ('b' e 'B' -> 11).
+    * argomenti:
+    *   c: il carattere
+    * return: da 0 a 15, -1 se c non e' una cifra esadecimale
+    */
+    v = c as int
+    if v >= 48 and v <= 57:
+        return v - 48
+    if v >= 97 and v <= 102:
+        return v - 87
+    if v >= 65 and v <= 70:
+        return v - 55
+    return -1
+
+
+def digit_to_char(n: int) -> char:
+    /*
+    * Restituisce la cifra di un valore, decimale o esadecimale (11 -> 'b').
+    * argomenti:
+    *   n: il valore, da 0 a 15
+    * return: da '0' a '9', poi da 'a' a 'f'
+    */
+    if n < 10:
+        return int_to_char(48 + n)
+    return int_to_char(87 + n)
+
+
+/* DA TESTO A NUMERO */
+
+def str_is_int(s: str) -> int:
+    /*
+    * Controlla se s e' un intero: un segno + o - facoltativo e almeno una
+    * cifra, senza altri caratteri (nemmeno spazi).
+    * argomenti:
+    *   s: il testo
+    * return: 1 se lo e', 0 altrimenti (anche per una str nulla)
+    */
+    if s == 0:
+        return 0
+    i = 0
+    if s[0] == '-' or s[0] == '+':
+        i = 1
+    if char_to_digit(s[i]) < 0:
+        return 0
+    while s[i] != '\0':
+        if char_to_digit(s[i]) < 0:
+            return 0
+        i++
+    return 1
+
+
+def str_to_long(s: str) -> long:
+    /*
+    * Converte l'intero scritto all'inizio di s, come atol del C: un segno
+    * facoltativo, poi le cifre fino al primo altro carattere. Oltre i 64 bit
+    * il valore si avvolge.
+    * argomenti:
+    *   s: il testo
+    * return: il valore, 0 se non ci sono cifre
+    */
+    result = 0 as long
+    if s == 0:
+        return result
+    i = 0
+    negative = 0
+    if s[0] == '-':
+        negative = 1
+        i = 1
+    elif s[0] == '+':
+        i = 1
+    d = char_to_digit(s[i])
+    while d >= 0:
+        result = result * (10 as long) + (d as long)
+        i++
+        d = char_to_digit(s[i])
+    if negative:
+        result = (0 as long) - result
+    return result
+
+
+def str_to_int(s: str) -> int:
+    /*
+    * Come str_to_long, tenendo i 32 bit bassi del risultato.
+    * argomenti:
+    *   s: il testo
+    * return: il valore, 0 se non ci sono cifre
+    */
+    return long_to_int(str_to_long(s))
+
+
+def hex_to_long(s: str) -> long:
+    /*
+    * Converte il numero esadecimale scritto all'inizio di s: un "0x" o "0X"
+    * facoltativo, poi le cifre fino al primo altro carattere.
+    * argomenti:
+    *   s: il testo, es. "ff" o "0x1F"
+    * return: il valore (16 cifre riempiono i 64 bit), 0 se non ci sono cifre
+    */
+    result = 0 as long
+    if s == 0:
+        return result
+    i = 0
+    if s[0] == '0' and (s[1] == 'x' or s[1] == 'X'):
+        i = 2
+    d = hex_digit_value(s[i])
+    while d >= 0:
+        result = (result << (4 as long)) | (d as long)
+        i++
+        d = hex_digit_value(s[i])
+    return result
+
+
+def pow10_float(e: int) -> float:
+    /*
+    * Restituisce 10 elevato a e, esatto fino a 10^22.
+    * argomenti:
+    *   e: l'esponente, 0 o piu'
+    * return: la potenza
+    */
+    scale = 1.0
+    power = 10.0
+    while e > 0:
+        if (e & 1) == 1:
+            scale = scale * power
+        power = power * power
+        e = e >> 1
+    return scale
+
+
+def str_to_float(s: str) -> float:
+    /*
+    * Converte il numero decimale scritto all'inizio di s, come atof del C:
+    * un segno facoltativo, le cifre, poi un '.' con altre cifre e un
+    * esponente ('e' o 'E', es. "1.5e-3") facoltativi. Coincide con float()
+    * di Python fino a 15 cifre significative ed esponenti entro +-22; oltre,
+    * l'errore relativo resta sotto 2e-15.
+    * argomenti:
+    *   s: il testo
+    * return: il valore, 0.0 se non ci sono cifre
+    */
+    if s == 0:
+        return 0.0
+    i = 0
+    negative = 0
+    if s[0] == '-':
+        negative = 1
+        i = 1
+    elif s[0] == '+':
+        i = 1
+
+    mantissa = 0 as long
+    significant = 0
+    exponent = 0
+    d = char_to_digit(s[i])
+    while d >= 0:
+        if significant < 18:
+            mantissa = mantissa * (10 as long) + (d as long)
+            if mantissa != (0 as long):
+                significant++
+        else:
+            exponent++
+        i++
+        d = char_to_digit(s[i])
+    if s[i] == '.':
+        i++
+        d = char_to_digit(s[i])
+        while d >= 0:
+            if significant < 18:
+                mantissa = mantissa * (10 as long) + (d as long)
+                exponent--
+                if mantissa != (0 as long):
+                    significant++
+            i++
+            d = char_to_digit(s[i])
+
+    if s[i] == 'e' or s[i] == 'E':
+        j = i + 1
+        exp_negative = 0
+        if s[j] == '-':
+            exp_negative = 1
+            j++
+        elif s[j] == '+':
+            j++
+        d = char_to_digit(s[j])
+        if d >= 0:
+            written = 0
+            while d >= 0:
+                if written < 400:
+                    written = written * 10 + d
+                j++
+                d = char_to_digit(s[j])
+            if exp_negative:
+                exponent = exponent - written
+            else:
+                exponent = exponent + written
+
+    result = mantissa as float
+    e = exponent
+    while e < -300:
+        result = result / pow10_float(300)
+        e = e + 300
+    while e > 300:
+        result = result * pow10_float(300)
+        e = e - 300
+    if e < 0:
+        result = result / pow10_float(0 - e)
+    else:
+        result = result * pow10_float(e)
+    if negative:
+        result = 0.0 - result
+    return result
+
+
+/* ==================== DA NUMERO A TESTO ==================== */
+
+def long_to_hex(x: long, width: int) -> str:
+    /*
+    * Scrive x in esadecimale minuscolo, senza "0x".
+    * argomenti:
+    *   x: il valore; se e' negativo si leggono i suoi 64 bit (16 cifre)
+    *   width: il numero minimo di cifre, con zeri davanti
+    * return: la stringa, es. long_to_hex(255, 4) -> "00ff"
+    */
+    n = 1
+    while n < 16:
+        if (x >> ((n * 4) as long)) == (0 as long):
+            break
+        n++
+    if width > n:
+        n = width
+    out = rt_alloc_up((n + 1) as long)
+    i = 0
+    while i < n:
+        shift = (n - 1 - i) * 4
+        if shift >= 64:
+            out[i] = '0'
+        else:
+            nibble = (x >> (shift as long)) & (15 as long)
+            out[i] = digit_to_char(long_to_int(nibble))
+        i++
+    out[n] = '\0'
+    rt_str_seal(out, n as long)
+    return out

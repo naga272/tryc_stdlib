@@ -1,0 +1,283 @@
+/*
+* Windows x64: kernel32 per i wrapper di libstd, e i file descriptor.
+* Un fd e' sempre un int: 0, 1 e 2 sono stdin, stdout e stderr
+* (GetStdHandle), ogni altro e' un HANDLE troncato a 32 bit, che Windows
+* garantisce di poter estendere col segno per riaverlo. Un HANDLE vero e'
+* un multiplo di 4 e mai 0, quindi non si confonde con 0, 1 e 2.
+* Gli errori tornano come quelli delle syscall Linux: -errno.
+*/
+
+libextern <kernel32.dll>
+
+#ifndef STD_INPUT_HANDLE
+#define STD_INPUT_HANDLE -10
+#endif
+
+#ifndef STD_OUTPUT_HANDLE
+#define STD_OUTPUT_HANDLE -11
+#endif
+
+
+#ifndef STD_ERROR_HANDLE
+#define STD_ERROR_HANDLE -12
+#endif
+
+
+#ifndef SYNCHRONIZE
+// diritto d'accesso: aspettare l'oggetto (processi, I/O sincrono)
+#define SYNCHRONIZE 1048576
+#endif
+
+
+#ifndef INFINITE
+// WaitForSingleObject
+#define INFINITE -1
+#endif
+
+#ifndef WAIT_TIMEOUT
+#define WAIT_TIMEOUT 258
+#endif
+
+#ifndef WAIT_FAILED
+#define WAIT_FAILED -1
+#endif
+
+
+#ifndef ERROR_FILE_NOT_FOUND
+// GetLastError
+#define ERROR_FILE_NOT_FOUND 2
+#endif
+
+#ifndef ERROR_PATH_NOT_FOUND
+#define ERROR_PATH_NOT_FOUND 3
+#endif
+
+#ifndef ERROR_ACCESS_DENIED
+#define ERROR_ACCESS_DENIED 5
+#endif
+
+#ifndef ERROR_INVALID_HANDLE
+#define ERROR_INVALID_HANDLE 6
+#endif
+
+#ifndef ERROR_NOT_ENOUGH_MEMORY
+#define ERROR_NOT_ENOUGH_MEMORY 8
+#endif
+
+#ifndef ERROR_SHARING_VIOLATION
+#define ERROR_SHARING_VIOLATION 32
+#endif
+
+#ifndef ERROR_FILE_EXISTS
+#define ERROR_FILE_EXISTS 80
+#endif
+
+#ifndef ERROR_BROKEN_PIPE
+#define ERROR_BROKEN_PIPE 109
+#endif
+
+#ifndef ERROR_ALREADY_EXISTS
+#define ERROR_ALREADY_EXISTS 183
+#endif
+
+#ifndef ERROR_DIRECTORY
+#define ERROR_DIRECTORY 267
+#endif
+
+
+#ifndef WIN_ENOENT
+// gli errno di Linux, negativi come li ritorna una syscall
+#define WIN_ENOENT -2
+#endif
+
+#ifndef WIN_EIO
+#define WIN_EIO -5
+#endif
+
+#ifndef WIN_EBADF
+#define WIN_EBADF -9
+#endif
+
+#ifndef WIN_ENOMEM
+#define WIN_ENOMEM -12
+#endif
+
+#ifndef WIN_EACCES
+#define WIN_EACCES -13
+#endif
+
+#ifndef WIN_EEXIST
+#define WIN_EEXIST -17
+#endif
+
+#ifndef WIN_ENOTDIR
+#define WIN_ENOTDIR -20
+#endif
+
+#ifndef WIN_EINVAL
+#define WIN_EINVAL -22
+#endif
+
+
+extern def GetLastError() -> int
+extern def GetStdHandle(std_handle: int) -> long
+extern def SetStdHandle(std_handle: int, handle: long) -> int
+extern def CloseHandle(handle: long) -> int
+extern def GetCurrentProcess() -> long
+extern def WaitForSingleObject(handle: long, milliseconds: int) -> int
+extern def GetModuleHandleA(name: str) -> long
+extern def GetProcAddress(module: long, name: str) -> long
+extern def GetFileType(file: long) -> int
+extern def GetHandleInformation(handle: long, flags: &int) -> int
+
+
+def win_handle(fd: int) -> long:
+    /*
+    * Restituisce l'HANDLE dietro un file descriptor.
+    * argomenti:
+    *   fd: il file descriptor; 0, 1 e 2 sono stdin, stdout e stderr
+    * return: l'HANDLE
+    */
+    if fd == 0:
+        return GetStdHandle(STD_INPUT_HANDLE)
+    if fd == 1:
+        return GetStdHandle(STD_OUTPUT_HANDLE)
+    if fd == 2:
+        return GetStdHandle(STD_ERROR_HANDLE)
+    return fd as long
+
+
+// GetFileType
+#define FILE_TYPE_UNKNOWN 0
+#define FILE_TYPE_DISK 1
+#define FILE_TYPE_CHAR 2
+#define FILE_TYPE_PIPE 3
+
+// getsockopt: per riconoscere una socket (vedi win_is_socket)
+#define WIN_SOL_SOCKET 65535
+#define WIN_SO_TYPE 4104
+
+
+def winsock_fn(name: str) -> long:
+    /*
+    * Restituisce l'indirizzo di una funzione di ws2_32.dll. Lo usa anche
+    * wrapper/windows/sysnet per le funzioni con lo stesso nome di quelle di
+    * libstd/net (socket, bind, listen, accept, connect).
+    * argomenti:
+    *   name: il nome della funzione
+    * return: l'indirizzo; 0 se il programma non carica ws2_32.dll (non usa
+    *   libstd/net), e allora nessun fd e' una socket
+    */
+    ws2 = GetModuleHandleA("ws2_32.dll")
+    if ws2 == 0:
+        return 0 as long
+    return GetProcAddress(ws2, name)
+
+
+def winsock_error() -> int:
+    /*
+    * Restituisce l'ultimo errore di Winsock come -errno, come una syscall
+    * di Linux.
+    * return: -WSAGetLastError()
+    */
+    unsafe:
+        ws_last_error = winsock_fn("WSAGetLastError") as &() -> int
+    return 0 - ws_last_error()
+
+
+def win_is_socket(fd: int) -> int:
+    /*
+    * Controlla se un fd e' una socket di Winsock, che si legge, scrive e
+    * chiude con recv, send e closesocket invece che come un file. Per Windows
+    * una socket e' una pipe: la riconosce getsockopt.
+    * argomenti:
+    *   fd: il file descriptor
+    * return: 1 se e' una socket, 0 altrimenti (sempre per 0, 1 e 2)
+    */
+    if fd <= 2:
+        return 0
+    handle = win_handle(fd)
+    if GetFileType(handle) != FILE_TYPE_PIPE:
+        return 0
+    getsockopt_addr = winsock_fn("getsockopt")
+    if getsockopt_addr == 0:
+        return 0
+
+    sock_type = 0
+    size = 4
+    unsafe:
+        ws_getsockopt = getsockopt_addr as &(long, int, int, long, long) -> int
+        response = ws_getsockopt(handle, WIN_SOL_SOCKET, WIN_SO_TYPE, &sock_type as long, &size as long)
+    if response == 0:
+        return 1
+    return 0
+
+
+def win_low32(value: long) -> int:
+    /*
+    * Restituisce i 32 bit bassi di un long ('as int' non tronca), per usare
+    * un HANDLE come fd.
+    * argomenti:
+    *   value: il valore
+    * return: i 32 bit bassi
+    */
+    buf = rt_alloc_up(8)
+    unsafe:
+        words = buf as ptr long
+        halves = buf as ptr int
+    words[0] = value
+    return halves[0]
+
+
+def win_u32(x: int) -> long:
+    /*
+    * Legge un int come intero senza segno a 32 bit, un DWORD.
+    * argomenti:
+    *   x: il valore
+    * return: il valore, da 0 a 4294967295
+    */
+    return (x as long) & (4294967295 as long)
+
+
+def win_u64(high: int, low: int) -> long:
+    /*
+    * Compone un intero a 64 bit dalle sue due meta' senza segno.
+    * argomenti:
+    *   high: i 32 bit alti
+    *   low: i 32 bit bassi
+    * return: il valore
+    */
+    return (win_u32(high) << (32 as long)) | win_u32(low)
+
+
+def win_unix_time(high: int, low: int) -> long:
+    /*
+    * Converte un FILETIME (tick da 100 ns dal 1601) in tick da 100 ns dal
+    * 1970.
+    * argomenti:
+    *   high, low: le due meta' del FILETIME
+    * return: i tick dal 1970
+    */
+    return win_u64(high, low) - (116444736000000000 as long)
+
+
+def win_error(code: int) -> int:
+    /*
+    * Traduce un codice di GetLastError nel -errno di Linux corrispondente.
+    * argomenti:
+    *   code: il codice
+    * return: il -errno, WIN_EIO per i codici senza corrispondenza
+    */
+    if code == ERROR_FILE_NOT_FOUND or code == ERROR_PATH_NOT_FOUND:
+        return WIN_ENOENT
+    if code == ERROR_ACCESS_DENIED or code == ERROR_SHARING_VIOLATION:
+        return WIN_EACCES
+    if code == ERROR_INVALID_HANDLE:
+        return WIN_EBADF
+    if code == ERROR_NOT_ENOUGH_MEMORY:
+        return WIN_ENOMEM
+    if code == ERROR_FILE_EXISTS or code == ERROR_ALREADY_EXISTS:
+        return WIN_EEXIST
+    if code == ERROR_DIRECTORY:
+        return WIN_ENOTDIR
+    return WIN_EIO

@@ -1,0 +1,1590 @@
+
+/*
+* Piccolo motore per la gestione dei server web in Tryc.
+* Il server permette l'aggiunta di funzioni Middleware.
+*
+* Modello (Linux): supervisore + worker con epoll. HttpServerRun crea
+* 'ncoworker' processi (fork); il padre non serve richieste, li
+* sorveglia e ne avvia uno nuovo se uno termina per un errore. Ogni
+* worker apre il proprio socket in ascolto sulla stessa porta
+* (SO_REUSEPORT, il kernel distribuisce i client fra i worker), ha la
+* propria istanza epoll e serve molte connessioni insieme su socket non
+* bloccanti, con keep-alive e pipelining HTTP/1.1. Le connessioni ferme
+* da troppo tempo vengono chiuse (setIdleTimeout, setRequestTimeout).
+*
+* Perche' processi e non thread: l'allocatore ad arena e' globale e non
+* thread-safe (vedi libstd/thread), e ogni richiesta alloca stringhe.
+* Con i thread di oggi un handler non potrebbe usare '+', 'new' o
+* readfile; i processi hanno ciascuno la propria arena.
+*
+* Su Windows (niente epoll) ogni processo serve una connessione alla
+* volta con socket bloccanti.
+*
+* Errori di un client (richiesta malformata, connessione chiusa a meta',
+* file statico mancante) diventano una risposta di errore o la chiusura
+* di quella connessione, mai la fine del processo.
+*/
+
+#include <libstd/cpuinfo>
+#include <libstd/net>
+#include <libstd/stdio>
+#include <libstd/string>
+#include <libstd/file>
+#include <libstd/dict>
+#include <libstd/list>
+#include <libstd/process>
+#include <libstd/sync>
+#include <libstd/type>
+#include <libstd/time>
+
+
+/*
+BUG:
+Sulla carta dovrebbe venire injectato l'uso dei dict perche' qui sotto vengono usati
+i dizionari, dovrebbe poter funzionare anche senza l'include libstd/dict
+*/
+
+
+// byte massimi di una richiesta (header + body) letti per connessione
+#define HTTP_MAX_REQUEST 65536
+
+// fd oltre questo limite vengono rifiutati (dimensione della tabella
+// delle connessioni di ogni processo)
+#define HTTP_MAX_FDS 4096
+
+// eventi letti da una singola epoll_pwait
+#define HTTP_MAX_EVENTS 64
+
+// header massimi per richiesta: oltre risponde 431 (ogni header e' una
+// voce in uno sdict, con un hash fisso: tanti nomi scelti apposta
+// costerebbero molto tempo di CPU)
+#define HTTP_MAX_HEADERS 100
+
+// coda di listen() se non impostata con setListen
+#define HTTP_DEFAULT_BACKLOG 511
+
+// millisecondi: connessione senza attivita' (keep-alive compreso) e
+// tempo massimo per ricevere una richiesta intera; 0 = nessun limite
+#define HTTP_DEFAULT_IDLE_TIMEOUT_MS 15000
+#define HTTP_DEFAULT_REQUEST_TIMEOUT_MS 10000
+
+// ogni quanto un worker controlla le connessioni scadute
+#define HTTP_SWEEP_MS 1000
+
+// il supervisore riavvia subito fino a 'ncoworker' worker per finestra di
+// HTTP_RESPAWN_WINDOW_MS; oltre (un errore che li fa terminare tutti in
+// continuazione) aspetta la fine della finestra
+#define HTTP_RESPAWN_WINDOW_MS 1000
+
+// fasi in cui viene chiamato un middleware (campo HttpRequest.phase)
+#define HTTP_PHASE_BEFORE 0
+#define HTTP_PHASE_AFTER 1
+
+// errori restituiti dalle syscall (negati)
+#define HTTP_EINTR -4
+#define HTTP_EAGAIN -11
+
+#define HTTP_EPOLLIN 1
+#define HTTP_EPOLLOUT 4
+#define HTTP_EPOLLERR 8
+#define HTTP_EPOLLHUP 16
+#define HTTP_EPOLLRDHUP 8192
+#define HTTP_EPOLLEXCLUSIVE 268435456
+
+#define HTTP_EPOLL_CTL_ADD 1
+#define HTTP_EPOLL_CTL_DEL 2
+#define HTTP_EPOLL_CTL_MOD 3
+
+// O_NONBLOCK / SOCK_NONBLOCK, O_CLOEXEC / SOCK_CLOEXEC / EPOLL_CLOEXEC
+#define HTTP_O_NONBLOCK 2048
+#define HTTP_CLOEXEC 524288
+
+// struct epoll_event: impaccata su x86_64 (12 byte), allineata su aarch64
+#ifdef __aarch64__
+#define HTTP_EPOLL_EVENT_SIZE 16
+#define HTTP_EPOLL_DATA_OFF 8
+#else
+#define HTTP_EPOLL_EVENT_SIZE 12
+#define HTTP_EPOLL_DATA_OFF 4
+#endif
+
+
+class HttpRequest:
+    req_http str
+    size_pack int
+    fd_sock SOCKET
+    action str
+    version str
+    path str
+    query str
+    body str
+    headers str
+    keep_alive int
+    bad int
+
+    // la risposta: gli handler e i middleware possono cambiarli
+    status int
+    content_type str
+    response_body str
+    phase int
+
+    getSock &HttpRequestGetSock
+    getVersion &HttpRequestGetVersion
+    getAction &HttpRequestGetAction
+    getPath &HttpRequestGetPath
+    getQuery &HttpRequestGetQuery
+    getHeader &HttpRequestGetHeader
+    close &HttpRequestCloseSock
+
+
+class HttpServer:
+    fd_sock SOCKET
+    saddr_in Sockaddr_in
+    len_queue int
+    door int
+    ip int[4]
+
+    map_middleware str
+    order_middleware List
+    map_path_function str
+    map_css_files str
+    map_js_files str
+
+    ncoworker long
+    supervisor_pid int
+    idle_timeout_ms long
+    request_timeout_ms long
+    now_ms long
+
+    setNumCoworker &HttpServerSetNumCoworker
+    getNumCoworker &HttpServerGetNumCoworker
+
+    addMiddleWare &HttpServerAddMiddleWare
+    delMiddleWare &HttpServerDelMiddleWare
+
+    addMapsFunction &HttpServerMapsFunctionAdd
+    delMapsFunction &HttpServerMapsFunctionDel
+
+    addMapJs &HttpServerMapsStaticJsAdd
+    delMapJs &HttpServerMapsStaticJsDel
+
+    addMapCss &HttpServerMapsStaticCssAdd
+    delMapCss &HttpServerMapsStaticCssDel
+
+    setDoor &HttpServerSetDoor
+    getDoor &HttpServerGetDoor
+
+    getIp &HttpServerGetIp
+    setIp &HttpServerSetIp
+
+    setListen &HttpServerSetListen
+    getListen &HttpServerGetListen
+
+    setIdleTimeout &HttpServerSetIdleTimeout
+    getIdleTimeout &HttpServerGetIdleTimeout
+    setRequestTimeout &HttpServerSetRequestTimeout
+    getRequestTimeout &HttpServerGetRequestTimeout
+
+    setBind &HttpServerSetBind
+    elaborateReq &HttpRequestElaborateReq
+
+    init_workers &HttpServerInitWorkers
+    own_listener &HttpServerOwnListener
+
+    run &HttpServerRun
+    close &HttpServerCloseSock
+
+
+/*
+* Stato di una connessione aperta (una per fd, in ogni processo)
+* rbuf: i byte ricevuti e non ancora consumati (HTTP_MAX_REQUEST + 1)
+* wbuf/wlen/woff: la risposta da spedire e quanto ne e' gia' partito
+* last_ms: ultimo evento sulla connessione (orologio monotono)
+* req_start_ms: quando e' arrivato il primo byte della richiesta in
+*   corso, 0 se non ce n'e' una a meta'
+* eof: il client ha chiuso il suo lato di scrittura: si risponde a cio'
+*   che e' gia' arrivato, poi si chiude
+*/
+class HttpConn:
+    fd SOCKET
+    rbuf str
+    rlen long
+    wbuf str
+    wlen long
+    woff long
+    close_after int
+    want_out int
+    active int
+    last_ms long
+    req_start_ms long
+    eof int
+
+
+/*
+* Funzioni di supporto
+*/
+
+
+def http_status_text(status: int) -> str:
+    /*
+    * Restituisce il testo di uno status HTTP (200 -> "OK").
+    * argomenti:
+    *   status: lo status
+    * return: il testo, "Unknown" per uno status che non conosce
+    */
+    if status == 200:
+        return "OK"
+    if status == 201:
+        return "Created"
+    if status == 204:
+        return "No Content"
+    if status == 301:
+        return "Moved Permanently"
+    if status == 302:
+        return "Found"
+    if status == 304:
+        return "Not Modified"
+    if status == 400:
+        return "Bad Request"
+    if status == 403:
+        return "Forbidden"
+    if status == 404:
+        return "Not Found"
+    if status == 405:
+        return "Method Not Allowed"
+    if status == 408:
+        return "Request Timeout"
+    if status == 413:
+        return "Payload Too Large"
+    if status == 431:
+        return "Request Header Fields Too Large"
+    if status == 500:
+        return "Internal Server Error"
+    if status == 501:
+        return "Not Implemented"
+    return "Unknown"
+
+
+def http_guess_content_type(path: str) -> str:
+    /*
+    * Restituisce il Content-Type di un file dalla sua estensione.
+    * argomenti:
+    *   path: il nome o il percorso del file
+    * return: il Content-Type, "application/octet-stream" se l'estensione non
+    *   e' nota
+    */
+    if endswith(path, ".html") == 1:
+        return "text/html; charset=utf-8"
+    if endswith(path, ".css") == 1:
+        return "text/css; charset=utf-8"
+    if endswith(path, ".js") == 1:
+        return "application/javascript; charset=utf-8"
+    if endswith(path, ".json") == 1:
+        return "application/json"
+    if endswith(path, ".png") == 1:
+        return "image/png"
+    if endswith(path, ".jpg") == 1:
+        return "image/jpeg"
+    if endswith(path, ".svg") == 1:
+        return "image/svg+xml"
+    if endswith(path, ".ico") == 1:
+        return "image/x-icon"
+    if endswith(path, ".txt") == 1:
+        return "text/plain; charset=utf-8"
+    return "application/octet-stream"
+
+
+def http_now_ms(tp: Timespec) -> long:
+    /*
+    * Restituisce l'istante dell'orologio monotono, in millisecondi.
+    * argomenti:
+    *   tp: una Timespec di appoggio
+    * return: i millisecondi
+    */
+    monotonic(tp)
+    return (tp.tv_sec * 1000) + (tp.tv_nsec / 1000000)
+
+
+def http_lower(s: str) -> str:
+    /*
+    * Restituisce una copia di s con le lettere A-Z in minuscolo (i nomi
+    * degli header non distinguono maiuscole e minuscole).
+    * argomenti:
+    *   s: il testo
+    * return: la copia
+    */
+    n = strlen(s)
+    out = rt_alloc_up(n + 1)
+    for i = 0 as long; i < n; i++:
+        v = char_to_int(s[i])
+        if v >= 65 and v <= 90:
+            v = v + 32
+        out[i] = int_to_char(v)
+    out[n] = '\0'
+    rt_str_seal(out, n)
+    return out
+
+
+def http_try_readfile(path: str) -> (int, str):
+    /*
+    * Legge un file come readfile, ma senza terminare il processo se il file
+    * manca.
+    * argomenti:
+    *   path: il percorso del file
+    * return: (1, contenuto), oppure (0, "") se il file non si legge
+    */
+    fd = open(path, "r")
+    if fd < 0:
+        return 0, ""
+
+    size_file = get_size_file(fd)
+    if size_file < 0:
+        close(fd)
+        return 0, ""
+
+    buffer = rt_alloc_up(size_file + 1)
+    total = 0 as long
+    while total < size_file:
+        response = sys_read(fd, buffer + total, size_file - total)
+        if response == HTTP_EINTR:
+            continue
+        if response <= 0:
+            break
+        total = total + response
+
+    close(fd)
+    rt_str_seal(buffer, total)
+    return 1, buffer
+
+
+def http_write_all(fd: SOCKET, data: str, length: long) -> int:
+    /*
+    * Scrive tutti i byte su un socket bloccante.
+    * argomenti:
+    *   fd: il socket
+    *   data: i byte
+    *   length: quanti byte
+    * return: 0 se e' partito tutto, -1 se la connessione e' caduta
+    */
+    sent = 0 as long
+    while sent < length:
+#ifdef __unix__
+        w = sys_send_nosignal(fd, data + sent, length - sent)
+#else
+        w = sys_write(fd, data + sent, length - sent)
+#endif
+        if w == HTTP_EINTR:
+            continue
+        if w <= 0:
+            return -1
+        sent = sent + w
+    return 0
+
+
+/*
+* Metodi per HttpServer
+*/
+
+
+def HttpServerSetNumCoworker(self: HttpServer, num_coworker: long) -> None:
+    /*
+    * Imposta quanti processi worker avvia run, almeno 1 (di solito
+    * logical_cpu_count()).
+    * argomenti:
+    *   num_coworker: il numero di worker
+    * return: nessuno (procedura)
+    */
+    self.ncoworker = num_coworker
+
+
+def HttpServerGetNumCoworker(self: HttpServer) -> long:
+    /*
+    * Restituisce il numero di worker impostato.
+    * return: il numero di worker
+    */
+    return self.ncoworker
+
+
+def HttpServerMapsStaticJsAdd(self: HttpServer, logical_js: str, fs_file: str) -> None:
+    /*
+    * Serve un file JavaScript a un percorso, rileggendolo dal disco a ogni
+    * richiesta. Un percorso gia' registrato stampa un messaggio e termina il
+    * programma.
+    * argomenti:
+    *   logical_js: il percorso della richiesta, es. "/app.js"
+    *   fs_file: il file sul disco
+    * return: nessuno (procedura)
+    */
+    if sdict_has(self.map_js_files, logical_js):
+        print("error! path ", logical_js, " already insert in dict map_js_files!\n")
+        exit(1)
+
+    self.map_js_files = sdict_set_grow(self.map_js_files, logical_js, fs_file)
+
+
+def HttpServerMapsStaticJsDel(self: HttpServer, logical_js: str) -> None:
+    /*
+    * Toglie un file JavaScript registrato. Un percorso sconosciuto stampa un
+    * messaggio e termina il programma.
+    * argomenti:
+    *   logical_js: il percorso della richiesta
+    * return: nessuno (procedura)
+    */
+    if not sdict_has(self.map_js_files, logical_js):
+        print("error! unknow path ", logical_js, " in dict map_js_files!\n")
+        exit(1)
+
+    sdict_del(self.map_js_files, logical_js)
+
+
+def HttpServerMapsStaticCssAdd(self: HttpServer, logical_css: str, fs_file: str) -> None:
+    /*
+    * Serve un file CSS a un percorso, rileggendolo dal disco a ogni
+    * richiesta. Un percorso gia' registrato stampa un messaggio e termina il
+    * programma.
+    * argomenti:
+    *   logical_css: il percorso della richiesta, es. "/style.css"
+    *   fs_file: il file sul disco
+    * return: nessuno (procedura)
+    */
+    if sdict_has(self.map_css_files, logical_css):
+        print("error! path ", logical_css, " already insert in dict map_css_files!\n")
+        exit(1)
+
+    self.map_css_files = sdict_set_grow(self.map_css_files, logical_css, fs_file)
+
+
+def HttpServerMapsStaticCssDel(self: HttpServer, logical_css: str) -> None:
+    /*
+    * Toglie un file CSS registrato. Un percorso sconosciuto stampa un
+    * messaggio e termina il programma.
+    * argomenti:
+    *   logical_css: il percorso della richiesta
+    * return: nessuno (procedura)
+    */
+    if not sdict_has(self.map_css_files, logical_css):
+        print("error! unknow path ", logical_css, " in dict map_css_files!\n")
+        exit(1)
+
+    sdict_del(self.map_css_files, logical_css)
+
+
+def HttpServerAddMiddleWare(self: HttpServer, identifier: str, function: str) -> None:
+    /*
+    * Aggiunge un middleware, una funzione &(HttpServer, HttpRequest) ->
+    * HttpRequest chiamata due volte per richiesta: prima della route
+    * (req.phase == HTTP_PHASE_BEFORE, nell'ordine di aggiunta) e dopo
+    * (HTTP_PHASE_AFTER, in ordine inverso), quando req.status,
+    * req.content_type e req.response_body contengono gia' la risposta e si
+    * possono ancora cambiare. Un nome gia' usato stampa un messaggio e
+    * termina il programma.
+    * argomenti:
+    *   identifier: il nome del middleware
+    *   function: la funzione, per nome
+    * return: nessuno (procedura)
+    */
+    if sdict_has(self.map_middleware, identifier):
+        print("error in HttpServerAddMiddleWare! someone else have the identifier: ", identifier, "\n")
+        exit(1)
+
+    self.map_middleware = sdict_set_grow(self.map_middleware, identifier, function)
+    list_push(self.order_middleware, identifier)
+
+
+def HttpServerDelMiddleWare(self: HttpServer, identifier: str) -> None:
+    /*
+    * Toglie un middleware. Un nome sconosciuto stampa un messaggio e termina
+    * il programma.
+    * argomenti:
+    *   identifier: il nome del middleware
+    * return: nessuno (procedura)
+    */
+    if not sdict_has(self.map_middleware, identifier):
+        print("error in HttpServerDelMiddleWare! unknow identifier: ", identifier, "\n")
+        exit(1)
+
+    sdict_del(self.map_middleware, identifier)
+
+    kept = list_new()
+    n = list_length(self.order_middleware)
+    for i = 0 as long; i < n; i++:
+        name = list_get(self.order_middleware, i) as str
+        if name != identifier:
+            list_push(kept, name)
+
+    list_clear(self.order_middleware)
+    n = list_length(kept)
+    for i = 0 as long; i < n; i++:
+        list_push(self.order_middleware, list_get(kept, i))
+
+
+def http_run_middleware(self: HttpServer, req: HttpRequest, phase: int) -> HttpRequest:
+    /*
+    * Passa una richiesta da tutti i middleware di una fase: nell'ordine di
+    * aggiunta prima della route, in ordine inverso dopo.
+    * argomenti:
+    *   self: il server
+    *   req: la richiesta
+    *   phase: HTTP_PHASE_BEFORE o HTTP_PHASE_AFTER
+    * return: la richiesta restituita dall'ultimo middleware
+    */
+    n = list_length(self.order_middleware)
+    if n == 0:
+        return req
+
+    req.phase = phase
+    for k = 0 as long; k < n; k++:
+        idx = k
+        if phase == HTTP_PHASE_AFTER:
+            idx = n - 1 - k
+        identifier = list_get(self.order_middleware, idx) as str
+        function_middleware = sdict_get(self.map_middleware, identifier)
+        execute_middleware = function_middleware as &(HttpServer, HttpRequest) -> HttpRequest
+        req = execute_middleware(self, req)
+    return req
+
+
+def HttpRequestElaborateReq(self: HttpServer, req: HttpRequest) -> str:
+    /*
+    * Risponde a una richiesta: la passa dai middleware, poi dalla route
+    * (funzione, css o js) di req.path, poi di nuovo dai middleware in ordine
+    * inverso. Un percorso senza route da' 404.
+    * argomenti:
+    *   req: la richiesta
+    * return: la risposta completa, header e body, da spedire
+    */
+    req = http_run_middleware(self, req, HTTP_PHASE_BEFORE)
+
+    if sdict_has(self.map_path_function, req.path):
+        foo = sdict_get(self.map_path_function, req.path)
+        action = foo as &(HttpServer, HttpRequest) -> str
+        req.response_body = action(self, req)
+        if req.content_type == "":
+            req.content_type = "text/html; charset=utf-8"
+
+    elif sdict_has(self.map_css_files, req.path):
+        ok, content = http_try_readfile(sdict_get(self.map_css_files, req.path))
+        if ok:
+            req.response_body = content
+            req.content_type = "text/css; charset=utf-8"
+        else:
+            req.status = 404
+
+    elif sdict_has(self.map_js_files, req.path):
+        ok, content = http_try_readfile(sdict_get(self.map_js_files, req.path))
+        if ok:
+            req.response_body = content
+            req.content_type = "application/javascript; charset=utf-8"
+        else:
+            req.status = 404
+
+    else:
+        req.status = 404
+
+    if req.status == 404 and req.response_body == "":
+        req.response_body = "error404, page not found!"
+        req.content_type = "text/html; charset=utf-8"
+
+    req = http_run_middleware(self, req, HTTP_PHASE_AFTER)
+
+    if req.content_type == "":
+        req.content_type = "text/html; charset=utf-8"
+    if find_char(req.content_type, '\r') >= 0 or find_char(req.content_type, '\n') >= 0:
+        req.content_type = "application/octet-stream"
+
+    body = req.response_body
+    body_len = strlen(body)
+    connection = "close"
+    if req.keep_alive:
+        connection = "keep-alive"
+
+    header = (
+        "HTTP/1.1 " + itoa(req.status) + " " + http_status_text(req.status) + "\r\n" +
+        "Content-Type: " + req.content_type + "\r\n" +
+        "Content-Length: " + itoa(body_len) + "\r\n" +
+        "Connection: " + connection + "\r\n\r\n"
+    )
+
+    if req.action == "HEAD":
+        return header
+    return header + body
+
+
+def http_error_response(status: int) -> str:
+    /*
+    * Restituisce una risposta di errore che chiude la connessione, senza
+    * passare dalle route (richiesta malformata o troppo grande).
+    * argomenti:
+    *   status: lo status
+    * return: la risposta completa
+    */
+    body = itoa(status) + " " + http_status_text(status) + "\n"
+    return (
+        "HTTP/1.1 " + itoa(status) + " " + http_status_text(status) + "\r\n" +
+        "Content-Type: text/plain; charset=utf-8\r\n" +
+        "Content-Length: " + itoa(strlen(body)) + "\r\n" +
+        "Connection: close\r\n\r\n" + body
+    )
+
+
+def http_describe_status(status: int) -> str:
+    /*
+    * Descrive lo stato di un processo terminato, come lo restituisce wait4:
+    * un'uscita normale o un segnale.
+    * argomenti:
+    *   status: lo stato
+    * return: es. "uscita 1" o "segnale 9"
+    */
+    sig = status & 127
+    if sig != 0:
+        return "segnale " + itoa(sig)
+    return "uscita " + itoa((status >> 8) & 255)
+
+
+def HttpServerInitWorkers(self: HttpServer) -> long:
+    /*
+    * Avvia i worker (almeno 1) e li sorveglia. Nei worker ritorna subito il
+    * numero del worker (1, 2...); nel padre non ritorna: aspetta i worker e
+    * ne riavvia uno al posto di ognuno che termina per un errore (subito,
+    * salvo piu' di ncoworker riavvii in HTTP_RESPAWN_WINDOW_MS). Se un worker
+    * viene fermato da fuori (SIGKILL, SIGTERM, SIGINT) termina anche il
+    * padre, e su Linux i worker rimasti ricevono SIGTERM.
+    * return: il numero del worker
+    */
+    workers = self.ncoworker
+    if workers < 1:
+        workers = 1 as long
+
+    started = 0 as long
+    for idx = 0 as long; idx < workers; idx++:
+        pid = fork()
+        if pid == 0:
+            return idx + 1
+        if pid < 0:
+            print("error in fork() function!\n")
+        else:
+            started++
+
+#ifdef __unix__
+    close(self.fd_sock)
+    self.fd_sock = -1
+#endif
+
+    print("http: supervisore " + itoa(get_pid()) + ", " + itoa(started) + " worker\n")
+
+    tp = new Timespec()
+    window_start = http_now_ms(tp)
+    restarts_in_window = 0 as long
+    next_id = workers + 1
+
+    while 1:
+        status = 0
+        pid = sys_wait4(-1, &status, 0, 0)
+        if pid == HTTP_EINTR:
+            continue
+
+        if pid > 0:
+            started--
+            sig = status & 127
+            if sig == SIGKILL or sig == SIGTERM or sig == SIGINT:
+                print("http: worker " + itoa(pid) + " fermato (" + http_describe_status(status) + "), chiudo il server\n")
+                exit(0)
+            print("http: worker " + itoa(pid) + " terminato (" + http_describe_status(status) + "), ne avvio un altro\n")
+
+        now = http_now_ms(tp)
+        if now - window_start >= HTTP_RESPAWN_WINDOW_MS:
+            window_start = now
+            restarts_in_window = 0
+        if restarts_in_window >= workers:
+            sleep_ms(HTTP_RESPAWN_WINDOW_MS - (now - window_start))
+            window_start = http_now_ms(tp)
+            restarts_in_window = 0
+        restarts_in_window++
+
+        pid = fork()
+        if pid == 0:
+            return next_id
+        if pid < 0:
+            print("error in fork() function!\n")
+        else:
+            started++
+        next_id++
+    return 0 as long
+
+
+def HttpServerOwnListener(self: HttpServer) -> None:
+    /*
+    * In un worker, apre un proprio socket in ascolto sulla stessa porta
+    * (SO_REUSEPORT), cosi' il kernel distribuisce i client fra i worker. Se
+    * non riesce resta sul socket del padre.
+    * return: nessuno (procedura)
+    */
+    own = sys_socket(AF_INET, SOCK_STREAM, TCP)
+    if own < 0:
+        return
+
+    set_sockopt(own, SOL_SOCKET, SO_REUSEADDR, 1)
+    set_sockopt(own, IPPROTO_TCP, TCP_NODELAY, 1)
+    if set_sockopt(own, SOL_SOCKET, SO_REUSEPORT, 1) < 0:
+        close(own)
+        return
+    if sys_bind(own, self.saddr_in) < 0 or sys_listen(own, self.len_queue) < 0:
+        close(own)
+        return
+
+#ifdef __unix__
+    flags = sys_fcntl(own, 3, 0)
+    if flags >= 0:
+        sys_fcntl(own, 4, flags | HTTP_O_NONBLOCK)
+#endif
+
+    if self.fd_sock >= 0:
+        close(self.fd_sock)
+    self.fd_sock = own
+
+
+def HttpServerRun(self: HttpServer) -> None:
+    /*
+    * Avvia il server: lega l'indirizzo, avvia i worker e serve le richieste.
+    * Non ritorna.
+    * return: nessuno (procedura)
+    */
+    if set_sockopt(self.fd_sock, SOL_SOCKET, SO_REUSEADDR, 1) < 0:
+        print("Errore nell'impostazione di SO_REUSEADDR\n")
+
+    if set_sockopt(self.fd_sock, SOL_SOCKET, SO_REUSEPORT, 1) < 0:
+        print("Errore nell'impostazione di SO_REUSEPORT\n")
+
+    bind(self.fd_sock, self.saddr_in)
+    listen(self.fd_sock, self.len_queue)
+
+#ifdef __unix__
+    flags = sys_fcntl(self.fd_sock, 3, 0)
+    if flags >= 0:
+        sys_fcntl(self.fd_sock, 4, flags | HTTP_O_NONBLOCK)
+#endif
+
+    self.supervisor_pid = get_pid()
+    worker = self.init_workers()
+
+#ifdef __unix__
+    sys_prctl(PR_SET_PDEATHSIG, SIGTERM as long)
+    if get_ppid() != self.supervisor_pid:
+        exit(0)
+
+    self.own_listener()
+    if self.fd_sock < 0:
+        print("http: il worker " + itoa(worker) + " non riesce ad aprire il socket in ascolto\n")
+        exit(1)
+#endif
+
+    print("http: worker " + itoa(worker) + " (processo " + itoa(get_pid()) + ") in ascolto su " + self.getIp() + ":" + itoa(self.door) + "\n")
+
+#ifdef __unix__
+    http_serve_epoll(self)
+#else
+    http_serve_blocking(self)
+#endif
+
+
+def HttpServerMapsFunctionAdd(self: HttpServer, virtual_path: str, name_function: str) -> None:
+    /*
+    * Associa a un percorso una route, una funzione &(HttpServer,
+    * HttpRequest) -> str che restituisce il body della risposta.
+    * argomenti:
+    *   virtual_path: il percorso esatto, es. "/hello"
+    *   name_function: la funzione, per nome
+    * return: nessuno (procedura)
+    */
+    self.map_path_function = sdict_set_grow(self.map_path_function, virtual_path, name_function)
+
+
+def HttpServerMapsFunctionDel(self: HttpServer, virtual_path: str) -> None:
+    /*
+    * Toglie la route di un percorso, se c'e'.
+    * argomenti:
+    *   virtual_path: il percorso
+    * return: nessuno (procedura)
+    */
+    if not sdict_has(self.map_path_function, virtual_path):
+        return
+    sdict_del(self.map_path_function, virtual_path)
+
+
+def HttpServerGetIp(self: HttpServer) -> str:
+    /*
+    * Restituisce l'indirizzo IP del server come testo, es. "127.0.0.1".
+    * return: l'indirizzo
+    */
+    ip_str_complete = (
+        itoa(self.ip[3]) + "." +
+        itoa(self.ip[2]) + "." +
+        itoa(self.ip[1]) + "." +
+        itoa(self.ip[0])
+    )
+    return ip_str_complete
+
+
+def HttpServerSetIp(self: HttpServer, first: int, second: int, third: int, fourth: int) -> None:
+    /*
+    * Imposta l'indirizzo IPv4 del server, first.second.third.fourth. Con una
+    * parte fuori da 0-255 stampa un messaggio e termina il programma.
+    * argomenti:
+    *   first, second, third, fourth: le quattro parti dell'indirizzo
+    * return: nessuno (procedura)
+    */
+    set_sockip(self.saddr_in, first, second, third, fourth)
+
+    self.ip[3] = first
+    self.ip[2] = second
+    self.ip[1] = third
+    self.ip[0] = fourth
+
+
+def HttpServerSetDoor(self: HttpServer, door: int) -> None:
+    /*
+    * Imposta la porta del server. Con una porta fuori da 0-65535 stampa un
+    * messaggio e termina il programma.
+    * argomenti:
+    *   door: la porta
+    * return: nessuno (procedura)
+    */
+    set_door(self.saddr_in, door)
+    self.door = door
+
+
+def HttpServerGetDoor(self: HttpServer) -> int:
+    /*
+    * Restituisce la porta del server.
+    * return: la porta
+    */
+    return self.door
+
+
+def HttpServerSetListen(self: HttpServer, new_len_queue: int) -> None:
+    /*
+    * Imposta la coda di listen(): quante connessioni possono aspettare di
+    * essere accettate.
+    * argomenti:
+    *   new_len_queue: la lunghezza della coda
+    * return: nessuno (procedura)
+    */
+    self.len_queue = new_len_queue
+
+
+def HttpServerGetListen(self: HttpServer) -> int:
+    /*
+    * Restituisce la lunghezza della coda di listen().
+    * return: la lunghezza
+    */
+    return self.len_queue
+
+
+def HttpServerSetIdleTimeout(self: HttpServer, ms: long) -> None:
+    /*
+    * Imposta dopo quanto si chiude una connessione senza attivita', anche
+    * una keep-alive in attesa della richiesta successiva.
+    * argomenti:
+    *   ms: i millisecondi, 0 per nessun limite
+    * return: nessuno (procedura)
+    */
+    self.idle_timeout_ms = ms
+
+
+def HttpServerGetIdleTimeout(self: HttpServer) -> long:
+    /*
+    * Restituisce il timeout di inattivita'.
+    * return: i millisecondi
+    */
+    return self.idle_timeout_ms
+
+
+def HttpServerSetRequestTimeout(self: HttpServer, ms: long) -> None:
+    /*
+    * Imposta il tempo massimo per ricevere una richiesta intera dal primo
+    * byte: oltre, il server risponde 408 e chiude.
+    * argomenti:
+    *   ms: i millisecondi, 0 per nessun limite
+    * return: nessuno (procedura)
+    */
+    self.request_timeout_ms = ms
+
+
+def HttpServerGetRequestTimeout(self: HttpServer) -> long:
+    /*
+    * Restituisce il timeout di una richiesta.
+    * return: i millisecondi
+    */
+    return self.request_timeout_ms
+
+
+def HttpServerSetBind(self: HttpServer, saddr_in: Sockaddr_in) -> None:
+    /*
+    * Imposta indirizzo e porta da un Sockaddr_in gia' pronto.
+    * argomenti:
+    *   saddr_in: l'indirizzo
+    * return: nessuno (procedura)
+    */
+    self.saddr_in.sin_fam_door = saddr_in.sin_fam_door
+    self.saddr_in.ip_addr = saddr_in.ip_addr
+
+
+def HttpServerCloseSock(self: HttpServer) -> None:
+    /*
+    * Chiude il socket in ascolto del server; se e' gia' chiuso stampa un
+    * messaggio.
+    * return: nessuno (procedura)
+    */
+    if self.fd_sock < 0:
+        print("Error in HttpServerCloseSock()! fd < 0: " + itoa(self.fd_sock) + "\n")
+        return
+
+    close(self.fd_sock)
+    self.fd_sock = -1
+
+
+def HttpServer(first: int, second: int, third: int, fourth: int, door: int) -> HttpServer:
+    /*
+    * Crea un server HTTP su first.second.third.fourth:door (0, 0, 0, 0 per
+    * tutte le interfacce).
+    * argomenti:
+    *   first, second, third, fourth: l'indirizzo IPv4
+    *   door: la porta
+    * return: il server
+    */
+    __init__ = new HttpServer()
+    __init__.fd_sock = socket(AF_INET, SOCK_STREAM, TCP)
+
+    set_sin_fam(__init__.saddr_in, AF_INET, 0x00)
+    __init__.setIp(first, second, third, fourth)
+    __init__.setDoor(door)
+    __init__.len_queue = HTTP_DEFAULT_BACKLOG
+    __init__.idle_timeout_ms = HTTP_DEFAULT_IDLE_TIMEOUT_MS as long
+    __init__.request_timeout_ms = HTTP_DEFAULT_REQUEST_TIMEOUT_MS as long
+
+    if set_sockopt(__init__.fd_sock, IPPROTO_TCP, TCP_NODELAY, 1) < 0:
+        print("Errore nell'impostazione di TCP_NODELAY\n")
+
+    __init__.map_path_function = sdict_new(1)
+    __init__.map_middleware = sdict_new(1)
+    __init__.map_css_files = sdict_new(1)
+    __init__.map_js_files = sdict_new(1)
+    return __init__
+
+
+/*
+*
+* Metodi per HttpRequest
+*
+*/
+
+
+def HttpRequestCloseSock(self: HttpRequest) -> None:
+    /*
+    * Chiude il socket della connessione.
+    * return: nessuno (procedura)
+    */
+    close(self.fd_sock)
+
+
+def HttpRequestGetVersion(self: HttpRequest) -> str:
+    /*
+    * Restituisce la versione HTTP della richiesta, es. "HTTP/1.1".
+    * return: la versione
+    */
+    return self.version
+
+
+def HttpRequestGetSock(self: HttpRequest) -> SOCKET:
+    /*
+    * Restituisce il socket della connessione.
+    * return: il socket
+    */
+    return self.fd_sock
+
+
+def HttpRequestGetAction(self: HttpRequest) -> str:
+    /*
+    * Restituisce il metodo della richiesta, es. "GET" o "POST".
+    * return: il metodo
+    */
+    return self.action
+
+
+def HttpRequestGetPath(self: HttpRequest) -> str:
+    /*
+    * Restituisce il percorso della richiesta senza la query ("/hello" per
+    * "/hello?x=1").
+    * return: il percorso
+    */
+    return self.path
+
+
+def HttpRequestGetQuery(self: HttpRequest) -> str:
+    /*
+    * Restituisce la query della richiesta, quello che segue il '?' (es.
+    * "x=1").
+    * return: la query, "" se non c'e'
+    */
+    return self.query
+
+
+def HttpRequestGetHeader(self: HttpRequest, name: str) -> str:
+    /*
+    * Restituisce il valore di un header; il nome non distingue maiuscole e
+    * minuscole.
+    * argomenti:
+    *   name: il nome, es. "Content-Type"
+    * return: il valore, "" se la richiesta non lo contiene
+    */
+    key = http_lower(name)
+    if sdict_has(self.headers, key):
+        return sdict_get(self.headers, key)
+    return ""
+
+
+def http_valid_header_name(line: str, name_len: long) -> int:
+    /*
+    * Controlla se i primi name_len caratteri di una riga sono un nome di
+    * header valido: senza spazi, tab o caratteri di controllo.
+    * argomenti:
+    *   line: la riga
+    *   name_len: la lunghezza del nome
+    * return: 1 se valido, 0 altrimenti
+    */
+    for i = 0 as long; i < name_len; i++:
+        v = char_to_int(line[i])
+        if v <= 32 or v >= 127:
+            return 0
+    return 1
+
+
+def http_parse_head(fd_sock: SOCKET, head: str) -> HttpRequest:
+    /*
+    * Costruisce una HttpRequest dagli header di una richiesta, tutto cio' che
+    * precede "\r\n\r\n". Se la richiesta non si puo' servire, req.bad e' lo
+    * status da rispondere (400, 431, 501), altrimenti 0.
+    * argomenti:
+    *   fd_sock: il socket della connessione
+    *   head: gli header
+    * return: la richiesta
+    */
+    req = new HttpRequest()
+    req.fd_sock = fd_sock
+    req.req_http = head
+    req.size_pack = long_to_int(strlen(head))
+    req.action = ""
+    req.version = ""
+    req.path = ""
+    req.query = ""
+    req.body = ""
+    req.headers = sdict_new(1)
+    req.status = 200
+    req.content_type = ""
+    req.response_body = ""
+    req.phase = HTTP_PHASE_BEFORE
+    req.keep_alive = 0
+    req.bad = 400
+
+    head_len = strlen(head)
+
+    line_end = findsubstr(head, "\r\n")
+    if line_end < 0:
+        line_end = head_len
+    line = get_chars_in_range(head, 0, line_end)
+
+    lim_low_req_line = find_char(line, ' ')
+    lim_high_req_line = rfind(line, ' ')
+    if lim_low_req_line <= 0 or lim_high_req_line <= lim_low_req_line + 1:
+        return req
+
+    req.action = get_chars_in_range(line, 0, lim_low_req_line)
+    target = get_chars_in_range(line, lim_low_req_line + 1, lim_high_req_line)
+    req.version = get_chars_in_range(line, lim_high_req_line + 1, strlen(line))
+
+    if startswith(req.version, "HTTP/") != 1 or target[0] != '/':
+        return req
+
+    query_start = find_char(target, '?')
+    if query_start >= 0:
+        req.path = get_chars_in_range(target, 0, query_start)
+        req.query = get_chars_in_range(target, query_start + 1, strlen(target))
+    else:
+        req.path = target
+
+    num_headers = 0
+    pos = line_end + 2
+    while pos < head_len:
+        hline_len = findsubstr(head + pos, "\r\n")
+        if hline_len < 0:
+            hline_len = head_len - pos
+
+        if hline_len > 0:
+            hline = get_chars_in_range(head, pos, pos + hline_len)
+            colon = find_char(hline, ':')
+            if colon <= 0 or http_valid_header_name(hline, colon) == 0:
+                return req
+            num_headers++
+            if num_headers > HTTP_MAX_HEADERS:
+                req.bad = 431
+                return req
+            name = http_lower(get_chars_in_range(hline, 0, colon))
+            value = strip(get_chars_in_range(hline, colon + 1, strlen(hline)), " \t")
+            if name == "content-length" and sdict_has(req.headers, name):
+                return req
+            req.headers = sdict_set_grow(req.headers, name, value)
+
+        pos = pos + hline_len + 2
+
+    if sdict_has(req.headers, "transfer-encoding"):
+        req.bad = 501
+        return req
+
+    connection = http_lower(req.getHeader("connection"))
+    if req.version == "HTTP/1.1":
+        req.keep_alive = 1
+        if connection == "close":
+            req.keep_alive = 0
+    elif connection == "keep-alive":
+        req.keep_alive = 1
+
+    req.bad = 0
+    return req
+
+
+def http_content_length(req: HttpRequest) -> long:
+    /*
+    * Restituisce il Content-Length di una richiesta.
+    * argomenti:
+    *   req: la richiesta
+    * return: la lunghezza; 0 se manca, -1 se non e' un numero, -2 se ha piu'
+    *   di 9 cifre
+    */
+    if not sdict_has(req.headers, "content-length"):
+        return 0 as long
+    value = sdict_get(req.headers, "content-length")
+    n = strlen(value)
+    if n == 0:
+        return -1 as long
+    for i = 0 as long; i < n; i++:
+        if char_to_digit(value[i]) < 0:
+            return -1 as long
+    if n > 9:
+        return -2 as long
+    return str_to_long(value)
+
+
+/*
+* Gestione delle connessioni
+*/
+
+
+def http_conn_handle_one(self: HttpServer, c: HttpConn) -> long:
+    /*
+    * Se il buffer di una connessione contiene una richiesta completa, la
+    * elabora, mette la risposta in c.wbuf e toglie la richiesta dal buffer.
+    * argomenti:
+    *   self: il server
+    *   c: la connessione
+    * return: 1 se c'e' una risposta da spedire, 0 se servono altri byte
+    */
+    header_end = findsubstr(c.rbuf, "\r\n\r\n")
+    if header_end < 0:
+        if find_char(c.rbuf, '\0') < c.rlen:
+            c.wbuf = http_error_response(400)
+            c.wlen = strlen(c.wbuf)
+            c.woff = 0
+            c.close_after = 1
+            c.rlen = 0
+            return 1
+        if c.rlen >= HTTP_MAX_REQUEST:
+            c.wbuf = http_error_response(413)
+            c.wlen = strlen(c.wbuf)
+            c.woff = 0
+            c.close_after = 1
+            c.rlen = 0
+            return 1
+        if c.rlen > 0 and c.req_start_ms == 0:
+            c.req_start_ms = self.now_ms
+        return 0
+
+    head = get_chars_in_range(c.rbuf, 0, header_end)
+    req = http_parse_head(c.fd, head)
+    if req.bad:
+        c.wbuf = http_error_response(req.bad)
+        c.wlen = strlen(c.wbuf)
+        c.woff = 0
+        c.close_after = 1
+        c.rlen = 0
+        return 1
+
+    body_start = header_end + 4
+    body_len = http_content_length(req)
+    if body_len < 0 or body_len > HTTP_MAX_REQUEST - body_start:
+        status = 413
+        if body_len == -1:
+            status = 400
+        c.wbuf = http_error_response(status)
+        c.wlen = strlen(c.wbuf)
+        c.woff = 0
+        c.close_after = 1
+        c.rlen = 0
+        return 1
+
+    request_end = body_start + body_len
+    if c.rlen < request_end:
+        if c.req_start_ms == 0:
+            c.req_start_ms = self.now_ms
+        return 0
+    c.req_start_ms = 0
+
+    if body_len > 0:
+        req.body = get_chars_in_range(c.rbuf, body_start, request_end)
+
+    response = self.elaborateReq(req)
+    c.wbuf = response
+    c.wlen = strlen(response)
+    c.woff = 0
+    if req.keep_alive == 0:
+        c.close_after = 1
+
+    leftover = c.rlen - request_end
+    if leftover > 0:
+        rest = get_chars_in_range(c.rbuf, request_end, c.rlen)
+        memcpy(c.rbuf, rest, leftover)
+    c.rlen = leftover
+    c.rbuf[c.rlen] = '\0'
+    return 1
+
+
+#ifdef __unix__
+
+
+def http_epoll_ctl(ep: int, op: int, fd: SOCKET, events: int) -> int:
+    /*
+    * Aggiunge, modifica o toglie un file descriptor da un'istanza epoll.
+    * argomenti:
+    *   ep: l'istanza epoll
+    *   op: HTTP_EPOLL_CTL_ADD, HTTP_EPOLL_CTL_MOD o HTTP_EPOLL_CTL_DEL
+    *   fd: il file descriptor
+    *   events: gli eventi, es. HTTP_EPOLLIN
+    * return: 0, negativo su errore
+    */
+    ev = rt_alloc_up(16)
+    poke_int(ev, events)
+    poke_int(ev + HTTP_EPOLL_DATA_OFF, fd)
+    poke_int(ev + HTTP_EPOLL_DATA_OFF + 4, 0)
+    return sys_epoll_ctl(ep, op, fd, ev)
+
+
+def http_conn_close(ep: int, c: HttpConn) -> None:
+    /*
+    * Chiude una connessione e la toglie da epoll.
+    * argomenti:
+    *   ep: l'istanza epoll
+    *   c: la connessione
+    * return: nessuno (procedura)
+    */
+    if c.active == 0:
+        return
+    http_epoll_ctl(ep, HTTP_EPOLL_CTL_DEL, c.fd, 0)
+    close(c.fd)
+    c.active = 0
+    c.rlen = 0
+    c.wbuf = ""
+    c.wlen = 0
+    c.woff = 0
+
+
+def http_conn_flush(ep: int, c: HttpConn) -> int:
+    /*
+    * Spedisce quanto possibile della risposta senza bloccare.
+    * argomenti:
+    *   ep: l'istanza epoll
+    *   c: la connessione
+    * return: 1 se la risposta e' partita tutta e la connessione resta
+    *   aperta, 0 se il socket e' pieno (si riprende con EPOLLOUT), -1 se la
+    *   connessione e' stata chiusa
+    */
+    while c.woff < c.wlen:
+        w = sys_send_nosignal(c.fd, c.wbuf + c.woff, c.wlen - c.woff)
+        if w > 0:
+            c.woff = c.woff + w
+            continue
+        if w == HTTP_EINTR:
+            continue
+        if w == HTTP_EAGAIN:
+            if c.want_out == 0:
+                http_epoll_ctl(ep, HTTP_EPOLL_CTL_MOD, c.fd, HTTP_EPOLLOUT)
+                c.want_out = 1
+            return 0
+        http_conn_close(ep, c)
+        return -1
+
+    c.wbuf = ""
+    c.wlen = 0
+    c.woff = 0
+    if c.close_after:
+        http_conn_close(ep, c)
+        return -1
+    if c.want_out:
+        http_epoll_ctl(ep, HTTP_EPOLL_CTL_MOD, c.fd, HTTP_EPOLLIN | HTTP_EPOLLRDHUP)
+        c.want_out = 0
+    return 1
+
+
+def http_conn_process(self: HttpServer, ep: int, c: HttpConn) -> None:
+    /*
+    * Risponde, una alla volta, alle richieste complete nel buffer di una
+    * connessione: la successiva solo dopo che e' partita la risposta
+    * precedente.
+    * argomenti:
+    *   self: il server
+    *   ep: l'istanza epoll
+    *   c: la connessione
+    * return: nessuno (procedura)
+    */
+    while c.active and c.wlen == 0:
+        if http_conn_handle_one(self, c) == 0:
+            if c.eof:
+                http_conn_close(ep, c)
+            return
+        if http_conn_flush(ep, c) <= 0:
+            return
+
+
+def http_conn_read(self: HttpServer, ep: int, c: HttpConn) -> None:
+    /*
+    * Legge i byte arrivati su una connessione e risponde alle richieste
+    * complete.
+    * argomenti:
+    *   self: il server
+    *   ep: l'istanza epoll
+    *   c: la connessione
+    * return: nessuno (procedura)
+    */
+    while 1:
+        room = HTTP_MAX_REQUEST - c.rlen
+        if room <= 0:
+            break
+        r = sys_read(c.fd, c.rbuf + c.rlen, room)
+        if r > 0:
+            c.rlen = c.rlen + r
+            c.rbuf[c.rlen] = '\0'
+            continue
+        if r == HTTP_EINTR:
+            continue
+        if r == HTTP_EAGAIN:
+            break
+        if r == 0:
+            c.eof = 1
+            break
+        http_conn_close(ep, c)
+        return
+
+    http_conn_process(self, ep, c)
+
+
+def http_accept_all(self: HttpServer, ep: int, listen_fd: SOCKET, conns: HttpConn[4096]) -> int:
+    /*
+    * Accetta tutti i client in coda e li aggiunge a epoll.
+    * argomenti:
+    *   self: il server
+    *   ep: l'istanza epoll
+    *   listen_fd: il socket in ascolto
+    *   conns: le connessioni, una per file descriptor
+    * return: il file descriptor piu' alto accettato, -1 se nessuno
+    */
+    max_fd = -1
+    while 1:
+        fd_client = sys_accept4(listen_fd, HTTP_O_NONBLOCK | HTTP_CLOEXEC)
+        if fd_client == HTTP_EINTR:
+            continue
+        if fd_client < 0:
+            return max_fd
+
+        if fd_client >= HTTP_MAX_FDS:
+            close(fd_client)
+            continue
+
+        set_sockopt(fd_client, IPPROTO_TCP, TCP_NODELAY, 1)
+
+        c = conns[fd_client]
+        if c.rbuf == 0:
+            c.rbuf = rt_alloc_up(HTTP_MAX_REQUEST + 1)
+
+        c.fd = fd_client
+        c.rlen = 0
+        c.rbuf[0] = '\0'
+        c.wbuf = ""
+        c.wlen = 0
+        c.woff = 0
+        c.close_after = 0
+        c.want_out = 0
+        c.active = 1
+        c.last_ms = self.now_ms
+        c.req_start_ms = 0
+        c.eof = 0
+
+        if http_epoll_ctl(ep, HTTP_EPOLL_CTL_ADD, fd_client, HTTP_EPOLLIN | HTTP_EPOLLRDHUP) < 0:
+            close(fd_client)
+            c.active = 0
+            continue
+
+        if fd_client > max_fd:
+            max_fd = fd_client
+
+
+def http_sweep(self: HttpServer, ep: int, conns: HttpConn[4096], max_fd: int) -> None:
+    /*
+    * Chiude le connessioni scadute: una richiesta a meta' da piu' di
+    * request_timeout_ms (con un 408), oppure nessuna attivita' da piu' di
+    * idle_timeout_ms.
+    * argomenti:
+    *   self: il server
+    *   ep: l'istanza epoll
+    *   conns: le connessioni
+    *   max_fd: il file descriptor piu' alto in uso
+    * return: nessuno (procedura)
+    */
+    now = self.now_ms
+    for fd = 0; fd <= max_fd; fd++:
+        c = conns[fd]
+        if c.active == 0:
+            continue
+
+        if self.request_timeout_ms > 0 and c.wlen == 0 and c.req_start_ms > 0:
+            if now - c.req_start_ms > self.request_timeout_ms:
+                msg = http_error_response(408)
+                sys_send_nosignal(c.fd, msg, strlen(msg))
+                http_conn_close(ep, c)
+                continue
+
+        if self.idle_timeout_ms > 0 and now - c.last_ms > self.idle_timeout_ms:
+            http_conn_close(ep, c)
+
+
+def http_serve_epoll(self: HttpServer) -> None:
+    /*
+    * Il ciclo di un worker su Linux: un'istanza epoll per il socket in
+    * ascolto e per tutte le connessioni. Non ritorna.
+    * argomenti:
+    *   self: il server
+    * return: nessuno (procedura)
+    */
+    listen_fd = self.fd_sock
+    ep = sys_epoll_create1(HTTP_CLOEXEC)
+    if ep < 0:
+        print("http: epoll_create1 fallita (" + itoa(ep) + "), uso il ciclo bloccante\n")
+        flags = sys_fcntl(listen_fd, 3, 0)
+        if flags >= 0:
+            sys_fcntl(listen_fd, 4, flags & (~HTTP_O_NONBLOCK))
+        http_serve_blocking(self)
+        return
+
+    if http_epoll_ctl(ep, HTTP_EPOLL_CTL_ADD, listen_fd, HTTP_EPOLLIN | HTTP_EPOLLEXCLUSIVE) < 0:
+        http_epoll_ctl(ep, HTTP_EPOLL_CTL_ADD, listen_fd, HTTP_EPOLLIN)
+
+    conns = new HttpConn[4096]
+    events = rt_alloc_up(HTTP_EPOLL_EVENT_SIZE * HTTP_MAX_EVENTS)
+    tp = new Timespec()
+    self.now_ms = http_now_ms(tp)
+    last_sweep = self.now_ms
+    max_fd = -1
+
+    while 1:
+        n = sys_epoll_pwait(ep, events, HTTP_MAX_EVENTS, HTTP_SWEEP_MS)
+        self.now_ms = http_now_ms(tp)
+
+        for i = 0; i < n; i++:
+            ev = events + i * HTTP_EPOLL_EVENT_SIZE
+            mask = peek_int(ev)
+            fd = peek_int(ev + HTTP_EPOLL_DATA_OFF)
+
+            if fd == listen_fd:
+                accepted = http_accept_all(self, ep, listen_fd, conns)
+                if accepted > max_fd:
+                    max_fd = accepted
+                continue
+
+            if fd < 0 or fd >= HTTP_MAX_FDS:
+                continue
+
+            c = conns[fd]
+            if c.active == 0:
+                continue
+
+            c.last_ms = self.now_ms
+
+            if c.wlen > 0:
+                if mask & (HTTP_EPOLLERR | HTTP_EPOLLHUP):
+                    http_conn_close(ep, c)
+                    continue
+
+                if http_conn_flush(ep, c) == 1:
+                    http_conn_process(self, ep, c)
+
+                continue
+
+            if mask & (HTTP_EPOLLIN | HTTP_EPOLLRDHUP | HTTP_EPOLLERR | HTTP_EPOLLHUP):
+                http_conn_read(self, ep, c)
+
+        if self.now_ms - last_sweep >= HTTP_SWEEP_MS:
+            http_sweep(self, ep, conns, max_fd)
+            last_sweep = self.now_ms
+
+
+#endif
+
+
+def http_serve_blocking(self: HttpServer) -> None:
+    /*
+    * Serve una connessione alla volta con socket bloccanti (Windows, o Linux
+    * senza epoll). Non ritorna.
+    * argomenti:
+    *   self: il server
+    * return: nessuno (procedura)
+    */
+    addr = new Sockaddr_in()
+    c = new HttpConn()
+    c.rbuf = rt_alloc_up(HTTP_MAX_REQUEST + 1)
+
+    while 1:
+        len_sock_addr_in = 16
+        fd_client = sys_accept(self.fd_sock, addr, &len_sock_addr_in)
+        if fd_client < 0:
+            continue
+
+        if self.idle_timeout_ms > 0:
+            seconds = self.idle_timeout_ms / 1000
+            if seconds < 1:
+                seconds = 1 as long
+            set_recv_timeout(fd_client, seconds)
+
+        c.fd = fd_client
+        c.rlen = 0
+        c.rbuf[0] = '\0'
+        c.close_after = 0
+        c.active = 1
+
+        while c.active:
+            handled = http_conn_handle_one(self, c)
+            if handled == 0:
+                room = HTTP_MAX_REQUEST - c.rlen
+                r = sys_read(c.fd, c.rbuf + c.rlen, room)
+                if r == HTTP_EINTR:
+                    continue
+                if r <= 0:
+                    c.active = 0
+                    continue
+                c.rlen = c.rlen + r
+                c.rbuf[c.rlen] = '\0'
+                continue
+
+            if http_write_all(c.fd, c.wbuf, c.wlen) < 0 or c.close_after:
+                c.active = 0
+            c.wbuf = ""
+            c.wlen = 0
+            c.woff = 0
+
+        close(fd_client)

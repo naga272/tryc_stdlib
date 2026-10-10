@@ -1,0 +1,181 @@
+libextern <httpapi.dll>
+
+extern class HTTP_REQUEST
+extern class HTTP_VERSION
+extern class HTTP_COOKED_URL
+extern class HTTPAPI_VERSION
+extern class HTTP_DATA_CHUNK
+
+#define ULONG long
+
+// PVOID             -> void * (come lo rappresento)
+#define HTTP_REQUEST_ID long
+#define HANDLE long
+
+/*
+
+WARN: il linguaggio per ora supporta solo il passaggio di istanze a struct / classi via ptr,
+non per valore. Il problema e' che questi obbrobri di Windows passano a volte per valore
+
+
+extern def HttpInitialize(HTTPAPI_VERSION Version, ULONG Flags, PVOID pReserved) -> ULONG
+extern def HttpTerminate(ULONG Flags, PVOID pReserved) -> ULONG
+extern def HttpIsFeatureSupported(HTTP_FEATURE_ID Feature, PVOID pReserved) -> ULONG
+
+
+extern def HttpCreateServerSession(
+    HTTPAPI_VERSION Version,
+    PHTTP_SERVER_SESSION_ID ServerSessionId,
+    ULONG Reserved
+) -> ULONG
+
+
+extern def HttpCloseServerSession(
+    HTTP_SERVER_SESSION_ID ServerSessionId
+) -> ULONG
+
+
+extern def HttpSetServerSessionProperty(
+    HTTP_SERVER_SESSION_ID ServerSessionId,
+    HTTP_SERVER_PROPERTY Property,
+    PVOID PropertyInformation,
+    ULONG PropertyInformationLength
+) -> ULONG
+
+
+extern def HttpQueryServerSessionProperty(
+    HTTP_SERVER_SESSION_ID ServerSessionId,
+    HTTP_SERVER_PROPERTY Property,
+    PVOID PropertyInformation,
+    ULONG PropertyInformationLength,
+    PULONG ReturnLength
+) -> ULONG
+
+
+extern def HttpCreateUrlGroup(
+    HTTP_SERVER_SESSION_ID ServerSessionId,
+    PHTTP_URL_GROUP_ID UrlGroupId,
+    ULONG Reserved
+) -> ULONG
+
+
+extern def HttpCloseUrlGroup(
+    HTTP_URL_GROUP_ID UrlGroupId
+) -> ULONG
+
+
+extern def HttpAddUrlToUrlGroup(
+    HTTP_URL_GROUP_ID UrlGroupId,
+    PCWSTR pFullyQualifiedUrl,
+    HTTP_URL_CONTEXT UrlContext,
+    ULONG Reserved
+) -> ULONG
+
+
+extern def HttpRemoveUrlFromUrlGroup(
+    HTTP_URL_GROUP_ID UrlGroupId,
+    PCWSTR pFullyQualifiedUrl,
+    ULONG Flags
+) -> ULONG
+
+
+extern def HttpSetUrlGroupProperty(
+    HTTP_URL_GROUP_ID UrlGroupId,
+    HTTP_URL_GROUP_PROPERTY Property,
+    PVOID PropertyInformation,
+    ULONG PropertyInformationLength
+) -> ULONG
+
+
+extern def HttpQueryUrlGroupProperty(
+    HTTP_URL_GROUP_ID UrlGroupId,
+    HTTP_URL_GROUP_PROPERTY Property,
+    PVOID PropertyInformation,
+    ULONG PropertyInformationLength,
+    PULONG ReturnLength
+) -> ULONG
+
+
+extern def HttpCreateRequestQueue(
+    Version: HTTPAPI_VERSION,
+    PCWSTR Name,
+    PSECURITY_ATTRIBUTES SecurityAttributes,
+    ULONG Flags,
+    PHANDLE RequestQueueHandle
+) -> ULONG
+
+
+extern def HttpCloseRequestQueue(
+    HANDLE RequestQueueHandle
+) -> ULONG
+
+
+extern def HttpShutdownRequestQueue(
+    HANDLE RequestQueueHandle
+) -> ULONG
+
+
+extern def HttpSetRequestQueueProperty(
+    HANDLE RequestQueueHandle,
+    HTTP_SERVER_PROPERTY Property,
+    PVOID PropertyInformation,
+    ULONG PropertyInformationLength,
+    ULONG Reserved,
+    PVOID pReserved
+) -> ULONG
+
+
+extern def HttpQueryRequestQueueProperty(
+    RequestQueueHandle: &HANDLE,
+    HTTP_SERVER_PROPERTY Property,
+    PVOID PropertyInformation,
+    ULONG PropertyInformationLength,
+    ULONG Reserved,
+    PULONG ReturnLength,
+    PVOID pReserved,
+    PVOID Overlapped
+) -> ULONG
+
+
+extern def HttpReceiveHttpRequest(
+    RequestQueueHandle: &HANDLE,
+    HTTP_REQUEST_ID RequestId,
+    ULONG Flags,
+    PHTTP_REQUEST pRequestBuffer,
+    ULONG RequestBufferLength,
+    PULONG BytesReturned,
+    LPOVERLAPPED pOverlapped
+) -> ULONG
+
+
+extern def HttpSendHttpResponse(
+    RequestQueueHandle: &HANDLE,
+    HTTP_REQUEST_ID RequestId,
+    ULONG Flags,
+    PHTTP_RESPONSE pHttpResponse,
+    PHTTP_CACHE_POLICY pCachePolicy,
+    PVOID pEntityChunks,
+    ULONG EntityChunkCount,
+    ULONG Reserved1,
+    LPOVERLAPPED pOverlapped,
+    PHTTP_LOG_DATA pLogData
+) -> ULONG
+
+
+extern def HttpSendResponseEntityBody(
+    RequestQueueHandle: &HANDLE,
+    HTTP_REQUEST_ID RequestId,
+    ULONG Flags,
+    USHORT EntityChunkCount,
+    PHTTP_DATA_CHUNK pEntityChunks,
+    PULONG pBytesSent,
+    PVOID pReserved1,
+    ULONG Reserved2,
+    LPOVERLAPPED pOverlapped,
+    PHTTP_LOG_DATA pLogData
+) -> ULONG
+
+
+extern def HttpCancelHttpRequest(RequestQueueHandle: &HANDLE, HTTP_REQUEST_ID RequestId, LPOVERLAPPED pOverlapped) -> ULONG
+
+*/

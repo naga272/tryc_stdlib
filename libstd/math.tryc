@@ -1,0 +1,342 @@
+
+#include <libstd/stdio>
+
+#define PI 3.14159265358979323846
+#define TAU 6.28318530717958647692
+
+
+#ifdef __aarch64__
+def a64_sin_cos(x: float, want_cos: int) -> float:
+    /*
+    * Calcola seno o coseno su aarch64, che non ha un'istruzione apposta:
+    * riduzione di Cody-Waite (esatta per |x| fino a circa 10^6) e polinomi
+    * di fdlibm.
+    * argomenti:
+    *   x: l'angolo in radianti
+    *   want_cos: 0 per il seno, 1 per il coseno
+    * return: il valore
+    */
+    k = x * 0.636619772367581382433
+    if k < 0.0:
+        k = k - 0.5
+    else:
+        k = k + 0.5
+    n = k as long
+    nf = n as float
+    r = x - nf * 1.57079632673412561417
+    r = r - nf * 0.0000000000607710050630396597660
+    r = r - nf * 0.00000000000000000000202226624871116645580
+    r = r - nf * 0.0000000000000000000000000000000847842766036889956997
+    z = r * r
+
+    s = 0.000000000158969099521155010221
+    s = s * z - 0.0000000250507602534068634195
+    s = s * z + 0.00000275573137070700676789
+    s = s * z - 0.000198412698298579493134
+    s = s * z + 0.00833333333332248946124
+    s = s * z - 0.166666666666666324348
+    sin_r = r + r * z * s
+
+    c = 0.0 - 0.0000000000113596475577881948265
+    c = c * z + 0.00000000208757232129817482790
+    c = c * z - 0.000000275573143513906633035
+    c = c * z + 0.0000248015872894767294178
+    c = c * z - 0.00138888888888741095749
+    c = c * z + 0.0416666666666666019037
+    cos_r = 1.0 - 0.5 * z + z * z * c
+
+    quadrant = (n + want_cos) & 3
+    if quadrant == 0:
+        return sin_r
+    if quadrant == 1:
+        return cos_r
+    if quadrant == 2:
+        return 0.0 - sin_r
+    return 0.0 - cos_r
+#endif
+
+
+def tryc_sin(x: float) -> float:
+    /*
+    * Restituisce il seno di x.
+    * argomenti:
+    *   x: l'angolo in radianti
+    * return: il seno
+    */
+#ifdef __aarch64__
+    return a64_sin_cos(x, 0)
+#else
+    asminline(
+        sub rsp, 8
+        movq [rsp], xmm0
+        fld qword [rsp]
+        fsin
+        fstp qword [rsp]
+        movq xmm0, [rsp]
+        add rsp, 8
+    ) endasm
+#endif
+
+
+def tryc_cos(x: float) -> float:
+    /*
+    * Restituisce il coseno di x.
+    * argomenti:
+    *   x: l'angolo in radianti
+    * return: il coseno
+    */
+#ifdef __aarch64__
+    return a64_sin_cos(x, 1)
+#else
+    asminline(
+        sub rsp, 8
+        movq [rsp], xmm0
+        fld qword [rsp]
+        fcos
+        fstp qword [rsp]
+        movq xmm0, [rsp]
+        add rsp, 8
+    ) endasm
+#endif
+
+
+def tryc_sqrt(x: float) -> float:
+    /*
+    * Restituisce la radice quadrata di x.
+    * argomenti:
+    *   x: il valore
+    * return: la radice, NaN se x e' negativo
+    */
+#ifdef __aarch64__
+    asminline(
+        fsqrt d0, d0
+    ) endasm
+#else
+    asminline(
+        sqrtsd xmm0, xmm0
+    ) endasm
+#endif
+
+
+def tryc_f32_bits(x: float) -> int:
+    /*
+    * Converte x in un float a 32 bit e ne restituisce i bit IEEE-754, come
+    * li legge la GPU in un buffer di float32.
+    * argomenti:
+    *   x: il valore
+    * return: i 32 bit
+    */
+#ifdef __aarch64__
+    asminline(
+        fcvt s0, d0
+        fmov w0, s0
+    ) endasm
+#else
+    asminline(
+        cvtsd2ss xmm0, xmm0
+        movd eax, xmm0
+    ) endasm
+#endif
+
+
+class Vec3:
+    x float
+    y float
+    z float
+
+
+def vec3_new(x: float, y: float, z: float) -> Vec3:
+    /*
+    * Crea un vettore a tre componenti.
+    * argomenti:
+    *   x, y, z: le componenti
+    * return: il vettore
+    */
+    v = new Vec3()
+    v.x = x
+    v.y = y
+    v.z = z
+    return v
+
+
+def vec3_sub(a: Vec3, b: Vec3) -> Vec3:
+    /*
+    * Restituisce la differenza a - b.
+    * argomenti:
+    *   a, b: i vettori
+    * return: un vettore nuovo
+    */
+    return vec3_new(a.x - b.x, a.y - b.y, a.z - b.z)
+
+
+def vec3_cross(a: Vec3, b: Vec3) -> Vec3:
+    /*
+    * Restituisce il prodotto vettoriale a x b.
+    * argomenti:
+    *   a, b: i vettori
+    * return: un vettore nuovo
+    */
+    return vec3_new(a.y * b.z - a.z * b.y, a.z * b.x - a.x * b.z, a.x * b.y - a.y * b.x)
+
+
+def vec3_dot(a: Vec3, b: Vec3) -> float:
+    /*
+    * Restituisce il prodotto scalare di a e b.
+    * argomenti:
+    *   a, b: i vettori
+    * return: il prodotto
+    */
+    return a.x * b.x + a.y * b.y + a.z * b.z
+
+
+def vec3_length(a: Vec3) -> float:
+    /*
+    * Restituisce la lunghezza di un vettore.
+    * argomenti:
+    *   a: il vettore
+    * return: la lunghezza
+    */
+    return tryc_sqrt(vec3_dot(a, a))
+
+
+def vec3_normalize(a: Vec3) -> Vec3:
+    /*
+    * Restituisce il vettore con la stessa direzione di a e lunghezza 1.
+    * argomenti:
+    *   a: il vettore, non nullo
+    * return: un vettore nuovo
+    */
+    len = vec3_length(a)
+    return vec3_new(a.x / len, a.y / len, a.z / len)
+
+
+def mat4_identity() -> float[16]:
+    /*
+    * Restituisce la matrice identita' 4x4, per colonne.
+    * return: la matrice
+    */
+    m = new float[16]
+    i = 0
+    while i < 16:
+        m[i] = 0.0
+        i = i + 1
+    m[0] = 1.0
+    m[5] = 1.0
+    m[10] = 1.0
+    m[15] = 1.0
+    return m
+
+
+def mat4_multiply(a: float[16], b: float[16]) -> float[16]:
+    /*
+    * Moltiplica due matrici 4x4 per colonne: applicare a*b a un vettore
+    * equivale ad applicare prima b, poi a (mvp = proj * view * model).
+    * argomenti:
+    *   a, b: le matrici
+    * return: una matrice nuova
+    */
+    c = new float[16]
+    col = 0
+    while col < 4:
+        row = 0
+        while row < 4:
+            total = 0.0
+            k = 0
+            while k < 4:
+                total = total + a[k * 4 + row] * b[col * 4 + k]
+                k = k + 1
+            c[col * 4 + row] = total
+            row = row + 1
+        col = col + 1
+    return c
+
+
+def mat4_rotate_y(angle: float) -> float[16]:
+    /*
+    * Restituisce la rotazione attorno all'asse Y.
+    * argomenti:
+    *   angle: l'angolo in radianti
+    * return: la matrice
+    */
+    c = tryc_cos(angle)
+    s = tryc_sin(angle)
+    m = mat4_identity()
+    m[0] = c
+    m[2] = 0.0 - s
+    m[8] = s
+    m[10] = c
+    return m
+
+
+def mat4_perspective(fovy: float, aspect: float, near: float, far: float) -> float[16]:
+    /*
+    * Restituisce la proiezione prospettica per Vulkan: asse Y del clip space
+    * verso il basso e profondita' da 0 a 1.
+    * argomenti:
+    *   fovy: l'angolo di vista verticale, in radianti
+    *   aspect: larghezza / altezza
+    *   near, far: le distanze dei piani di taglio vicino e lontano
+    * return: la matrice
+    */
+    half = fovy / 2.0
+    f = tryc_cos(half) / tryc_sin(half)
+    m = new float[16]
+    i = 0
+    while i < 16:
+        m[i] = 0.0
+        i = i + 1
+    m[0] = f / aspect
+    m[5] = 0.0 - f
+    m[10] = far / (near - far)
+    m[11] = 0.0 - 1.0
+    m[14] = (near * far) / (near - far)
+    return m
+
+
+def mat4_look_at(eye: Vec3, center: Vec3, up: Vec3) -> float[16]:
+    /*
+    * Restituisce la matrice di vista di una camera in eye che guarda verso
+    * center.
+    * argomenti:
+    *   eye: la posizione della camera
+    *   center: il punto guardato
+    *   up: la direzione verso l'alto
+    * return: la matrice
+    */
+    f = vec3_normalize(vec3_sub(center, eye))
+    s = vec3_normalize(vec3_cross(f, up))
+    u = vec3_cross(s, f)
+    m = new float[16]
+    m[0] = s.x
+    m[1] = u.x
+    m[2] = 0.0 - f.x
+    m[3] = 0.0
+    m[4] = s.y
+    m[5] = u.y
+    m[6] = 0.0 - f.y
+    m[7] = 0.0
+    m[8] = s.z
+    m[9] = u.z
+    m[10] = 0.0 - f.z
+    m[11] = 0.0
+    m[12] = 0.0 - vec3_dot(s, eye)
+    m[13] = 0.0 - vec3_dot(u, eye)
+    m[14] = vec3_dot(f, eye)
+    m[15] = 1.0
+    return m
+
+
+def mat4_mul_vec4(m: float[16], x: float, y: float, z: float, w: float) -> float[4]:
+    /*
+    * Moltiplica una matrice 4x4 per colonne per il vettore (x, y, z, w).
+    * argomenti:
+    *   m: la matrice
+    *   x, y, z, w: il vettore
+    * return: il vettore risultato
+    */
+    r = new float[4]
+    row = 0
+    while row < 4:
+        r[row] = m[row] * x + m[4 + row] * y + m[8 + row] * z + m[12 + row] * w
+        row = row + 1
+    return r

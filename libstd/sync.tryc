@@ -1,0 +1,150 @@
+/*
+* Primitive di sincronizzazione a basso livello.
+* Accesso a memoria grezza, operazioni atomiche, e la syscall futex.
+* Servono da fondamenta per libstd/thread
+* (vedi thread_join li' per l'uso reale di sys_futex_wait/wake),
+* ma sono generiche: utili ovunque serva condividere memoria fra piu' thread senza corromperla
+* (es. un contatore condiviso, un semplice spinlock/mutex scritto a mano).
+*/
+#include <libstd/macro>
+
+#ifdef __unix__
+#include <libstd/wrapper/linux/syssync>
+#else
+#include <libstd/wrapper/windows/syssync>
+#endif
+
+
+def peek_int(ptr: str) -> int:
+    /*
+    * Legge l'intero a 32 bit all'indirizzo ptr.
+    * argomenti:
+    *   ptr: l'indirizzo, con almeno 4 byte validi
+    * return: il valore
+    */
+#ifdef __aarch64__
+    asminline(
+        ldar w0, [x0]
+    ) endasm
+#else
+    asminline(
+        mov eax, [rdi]
+    )endasm
+#endif
+
+
+def poke_int(ptr: str, value: int) -> None:
+    /*
+    * Scrive un intero a 32 bit all'indirizzo ptr.
+    * argomenti:
+    *   ptr: l'indirizzo, con almeno 4 byte validi
+    *   value: il valore
+    * return: nessuno (procedura)
+    */
+#ifdef __aarch64__
+    asminline(
+        stlr w1, [x0]
+    ) endasm
+#else
+    asminline(
+        mov [rdi], esi
+    )endasm
+#endif
+
+
+def peek_long(ptr: str) -> long:
+    /*
+    * Legge l'intero a 64 bit all'indirizzo ptr (un puntatore, un HANDLE).
+    * argomenti:
+    *   ptr: l'indirizzo, con almeno 8 byte validi
+    * return: il valore
+    */
+#ifdef __aarch64__
+    asminline(
+        ldar x0, [x0]
+    ) endasm
+#else
+    asminline(
+        mov rax, [rdi]
+    )endasm
+#endif
+
+
+def poke_long(ptr: str, value: long) -> None:
+    /*
+    * Scrive un intero a 64 bit all'indirizzo ptr.
+    * argomenti:
+    *   ptr: l'indirizzo, con almeno 8 byte validi
+    *   value: il valore
+    * return: nessuno (procedura)
+    */
+#ifdef __aarch64__
+    asminline(
+        stlr x1, [x0]
+    ) endasm
+#else
+    asminline(
+        mov [rdi], rsi
+    )endasm
+#endif
+
+
+def atomic_add32(ptr: str, delta: int) -> int:
+    /*
+    * Somma delta all'intero a 32 bit all'indirizzo ptr, in modo atomico
+    * anche con piu' thread.
+    * argomenti:
+    *   ptr: l'indirizzo
+    *   delta: quanto sommare (negativo per sottrarre)
+    * return: il valore prima della somma
+    */
+#ifdef __aarch64__
+    asminline(
+        .retry:
+            ldaxr w9, [x0]
+            add w10, w9, w1
+            stlxr w11, w10, [x0]
+            cbnz w11, .retry
+        dmb ish
+        mov w0, w9
+    ) endasm
+#else
+    asminline(
+        mov eax, esi
+        lock xadd [rdi], eax
+    )endasm
+#endif
+
+
+def atomic_cas32(ptr: str, expected: int, desired: int) -> int:
+    /*
+    * Scambio atomico (compare-and-swap): se l'intero a 32 bit all'indirizzo
+    * ptr vale expected, lo sostituisce con desired.
+    * argomenti:
+    *   ptr: l'indirizzo
+    *   expected: il valore atteso
+    *   desired: il valore nuovo
+    * return: il valore prima della chiamata, uguale a expected se lo scambio
+    *   e' avvenuto
+    */
+#ifdef __aarch64__
+    asminline(
+        .retry:
+            ldaxr w9, [x0]
+            cmp w9, w1
+            b.ne .fail
+            stlxr w10, w2, [x0]
+            cbnz w10, .retry
+            b .done
+        .fail:
+            clrex
+        .done:
+        dmb ish
+        mov w0, w9
+    ) endasm
+#else
+    asminline(
+        mov eax, esi
+        lock cmpxchg [rdi], edx
+    )endasm
+#endif

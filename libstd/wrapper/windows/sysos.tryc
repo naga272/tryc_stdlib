@@ -1,0 +1,542 @@
+/*
+* Windows x64: le sys_* di libstd/os con kernel32 (e ntdll per la
+* versione). Costanti, SysInfo e i campi di sys_uname sono quelli di
+* wrapper/linux/sysos, agli stessi offset: le funzioni comuni di os.tryc
+* (os_name, hostname, ...) non cambiano.
+*/
+
+#include <libstd/wrapper/windows/kernel32>
+
+#ifndef UTSNAME_FIELD_SIZE
+// struct new_utsname del kernel (<linux/utsname.h>): 6 campi da 65
+// byte ciascuno (stringa null-terminated), 390 byte totali.
+#define UTSNAME_FIELD_SIZE 65
+#endif
+
+#ifndef UTSNAME_TOTAL_SIZE
+#define UTSNAME_TOTAL_SIZE 390
+#endif
+
+#ifndef UTSNAME_OFF_SYSNAME
+#define UTSNAME_OFF_SYSNAME 0
+#endif
+
+#ifndef UTSNAME_OFF_NODENAME
+#define UTSNAME_OFF_NODENAME 65
+#endif
+
+#ifndef UTSNAME_OFF_RELEASE
+#define UTSNAME_OFF_RELEASE 130
+#endif
+
+#ifndef UTSNAME_OFF_VERSION
+#define UTSNAME_OFF_VERSION 195
+#endif
+
+
+#ifndef X_OK
+/*
+* modalita' per sys_access (vedi libstd/file)
+*/
+#define X_OK 1
+#endif
+
+#ifndef UTSNAME_OFF_MACHINE
+#define UTSNAME_OFF_MACHINE 260
+#endif
+
+#ifndef UTSNAME_OFF_DOMAINNAME
+#define UTSNAME_OFF_DOMAINNAME 325
+#endif
+
+
+#ifndef OS_PATH_MAX
+// dimensione di un buffer sufficiente per un percorso assoluto
+#define OS_PATH_MAX 4096
+#endif
+
+// struct sysinfo di Linux (man 2 sysinfo), riempita da sys_sysinfo; qui
+// memoria e swap sono in byte (mem_unit 1)
+class SysInfo --no-padding:
+    uptime long
+    load1 long
+    load2 long
+    load3 long
+    total_ram long
+    free_ram long
+    sharedram long
+    bufferram long
+    totalswap long
+    freeswap long
+    procs short
+    totalhigh long
+    freehigh long
+    mem_unit int
+    __pad0 long
+    __pad1 long
+    __pad2 long
+    __pad3 long
+    __pad4 long
+    __pad5 long
+    __pad6 long
+    __pad7 long
+
+
+libextern <ntdll.dll>
+
+// sys_getcwd: il buffer e' troppo piccolo
+#define WIN_ERANGE -34
+
+// byte di MEMORYSTATUSEX, RTL_OSVERSIONINFOW e SYSTEM_INFO
+#define MEMORYSTATUSEX_SIZE 64
+#define RTL_OSVERSIONINFOW_SIZE 276
+#define SYSTEM_INFO_SIZE 48
+
+// GetComputerNameExA
+#define COMPUTER_NAME_DNS_HOSTNAME 1
+#define COMPUTER_NAME_DNS_DOMAIN 2
+
+// GetNativeSystemInfo: wProcessorArchitecture
+#define PROCESSOR_ARCHITECTURE_INTEL 0
+#define PROCESSOR_ARCHITECTURE_ARM 5
+#define PROCESSOR_ARCHITECTURE_AMD64 9
+#define PROCESSOR_ARCHITECTURE_ARM64 12
+
+// GetFileAttributesA: un link simbolico (o un altro reparse point)
+#define FILE_ATTRIBUTE_REPARSE_POINT 1024
+
+
+extern def GetTickCount64() -> long
+extern def GlobalMemoryStatusEx(status: str) -> int
+extern def GetCurrentDirectoryA(size: int, buffer: str) -> int
+extern def SetCurrentDirectoryA(path: str) -> int
+extern def GetComputerNameExA(name_type: int, buffer: str, size: &int) -> int
+extern def RtlGetVersion(info: str) -> int
+extern def GetNativeSystemInfo(info: str) -> None
+extern def GetFinalPathNameByHandleA(file: long, path: str, size: int, flags: int) -> int
+extern def CreatePipe(read_pipe: &long, write_pipe: &long, attributes: str, size: int) -> int
+extern def GetEnvironmentVariableA(name: str, buffer: str, size: int) -> int
+extern def GetFullPathNameA(path: str, size: int, buffer: str, file_part: long) -> int
+extern def GetModuleFileNameA(module: long, name: str, size: int) -> int
+
+
+def win_process_count() -> int:
+    /*
+    * Conta i processi del sistema, dalla lista di Toolhelp.
+    * return: il numero dei processi, 0 se la lista non si legge
+    */
+    snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)
+    if snapshot == -1 as long:
+        return 0
+
+    entry = rt_alloc_up(PROCESSENTRY32_SIZE)
+    unsafe:
+        fields = entry as ptr int
+    fields[0] = PROCESSENTRY32_SIZE
+
+    count = 0
+    found = Process32First(snapshot, entry)
+    while found != 0:
+        count++
+        found = Process32Next(snapshot, entry)
+
+    CloseHandle(snapshot)
+    return count
+
+
+def sys_sysinfo(sysinfo_i: SysInfo) -> int:
+    /*
+    * Come sysinfo di Linux: l'uptime da GetTickCount64, la memoria da
+    * GlobalMemoryStatusEx (lo swap e' il file di paging: il limite di commit
+    * meno la RAM), il numero dei processi da Toolhelp. Windows non ha il
+    * carico medio: loads vale 0.
+    * argomenti:
+    *   sysinfo_i: dove scrivere le statistiche
+    * return: 0, -errno in caso di errore
+    */
+    status = rt_alloc_up(MEMORYSTATUSEX_SIZE)
+    unsafe:
+        words = status as ptr long
+    words[0] = MEMORYSTATUSEX_SIZE as long
+    if GlobalMemoryStatusEx(status) == 0:
+        return win_error(GetLastError())
+
+    free_swap = words[4] - words[2]
+    if free_swap < 0 as long:
+        free_swap = 0 as long
+
+    sysinfo_i.uptime = GetTickCount64() / (1000 as long)
+    sysinfo_i.load1 = 0 as long
+    sysinfo_i.load2 = 0 as long
+    sysinfo_i.load3 = 0 as long
+    sysinfo_i.total_ram = words[1]
+    sysinfo_i.free_ram = words[2]
+    sysinfo_i.sharedram = 0 as long
+    sysinfo_i.bufferram = 0 as long
+    sysinfo_i.totalswap = words[3] - words[1]
+    sysinfo_i.freeswap = free_swap
+    sysinfo_i.procs = win_process_count()
+    sysinfo_i.totalhigh = 0 as long
+    sysinfo_i.freehigh = 0 as long
+    sysinfo_i.mem_unit = 1
+    return 0
+
+
+def sys_getcwd(buf: str, size: int) -> int:
+    /*
+    * Scrive in buf la directory di lavoro corrente, come getcwd di Linux.
+    * argomenti:
+    *   buf: il buffer
+    *   size: la sua dimensione in byte
+    * return: la lunghezza del percorso, terminatore compreso; -errno in caso
+    *   di errore (WIN_ERANGE se buf e' troppo piccolo)
+    */
+    n = GetCurrentDirectoryA(size, buf)
+    if n == 0:
+        return win_error(GetLastError())
+    if n >= size:
+        return WIN_ERANGE
+
+    return n + 1
+
+
+def sys_chdir(path: str) -> int:
+    /*
+    * Cambia la directory di lavoro del processo.
+    * argomenti:
+    *   path: la nuova directory, assoluta o relativa
+    * return: 0, -errno in caso di errore
+    */
+    if SetCurrentDirectoryA(path) == 0:
+        return win_error(GetLastError())
+
+    return 0
+
+
+def win_uname_put(buf: str, offset: int, value: str) -> None:
+    /*
+    * Scrive un campo di utsname: al massimo 64 caratteri e il terminatore.
+    * argomenti:
+    *   buf: il buffer di sys_uname
+    *   offset: l'offset del campo, UTSNAME_OFF_*
+    *   value: il testo
+    * return: nessuno (procedura)
+    */
+    unsafe:
+        out = buf as ptr char
+    n = long_to_int(strlen(value))
+    if n > UTSNAME_FIELD_SIZE - 1:
+        n = UTSNAME_FIELD_SIZE - 1
+
+    i = 0
+    while i < n:
+        out[offset + i] = value[i]
+        i++
+
+    out[offset + n] = '\0'
+
+
+def win_computer_name(name_type: int) -> str:
+    /*
+    * Legge un nome della macchina (GetComputerNameExA).
+    * argomenti:
+    *   name_type: COMPUTER_NAME_DNS_HOSTNAME o COMPUTER_NAME_DNS_DOMAIN
+    * return: il nome, "" se non si legge
+    */
+    name = rt_alloc_up(256)
+    size = 256
+    if GetComputerNameExA(name_type, name, &size) == 0:
+        return ""
+
+    return name
+
+
+def sys_uname(buf: str) -> int:
+    /*
+    * Come uname di Linux, con gli stessi campi agli stessi offset: sysname
+    * "Windows", nodename il nome della macchina, release la versione (es.
+    * 10.0.26200, da RtlGetVersion), version la build, machine come su Linux
+    * (x86_64, aarch64), domainname il dominio DNS o "(none)".
+    * argomenti:
+    *   buf: il buffer, di almeno UTSNAME_TOTAL_SIZE byte
+    * return: 0
+    */
+    version = rt_alloc_up(RTL_OSVERSIONINFOW_SIZE)
+    unsafe:
+        v = version as ptr int
+    v[0] = RTL_OSVERSIONINFOW_SIZE
+    RtlGetVersion(version)
+
+    info = rt_alloc_up(SYSTEM_INFO_SIZE)
+    GetNativeSystemInfo(info)
+    unsafe:
+        system = info as ptr int
+    arch = system[0] & 65535
+    machine = "unknown"
+    if arch == PROCESSOR_ARCHITECTURE_AMD64:
+        machine = "x86_64"
+    elif arch == PROCESSOR_ARCHITECTURE_ARM64:
+        machine = "aarch64"
+    elif arch == PROCESSOR_ARCHITECTURE_ARM:
+        machine = "arm"
+    elif arch == PROCESSOR_ARCHITECTURE_INTEL:
+        machine = "i686"
+
+    domain = win_computer_name(COMPUTER_NAME_DNS_DOMAIN)
+    if domain == "":
+        domain = "(none)"
+
+    win_uname_put(buf, UTSNAME_OFF_SYSNAME, "Windows")
+    win_uname_put(buf, UTSNAME_OFF_NODENAME, win_computer_name(COMPUTER_NAME_DNS_HOSTNAME))
+    win_uname_put(buf, UTSNAME_OFF_RELEASE, itoa(v[1]) + "." + itoa(v[2]) + "." + itoa(v[3]))
+    win_uname_put(buf, UTSNAME_OFF_VERSION, "build " + itoa(v[3]))
+    win_uname_put(buf, UTSNAME_OFF_MACHINE, machine)
+    win_uname_put(buf, UTSNAME_OFF_DOMAINNAME, domain)
+    return 0
+
+
+def sys_readlink(path: str, buf: str, size: int) -> int:
+    /*
+    * Legge il percorso a cui porta un link simbolico, come readlink di
+    * Linux: il percorso finale, senza il prefisso \\?\ e senza terminatore.
+    * argomenti:
+    *   path: il link
+    *   buf: dove scrivere il percorso
+    *   size: la dimensione di buf
+    * return: i byte scritti, -errno in caso di errore (WIN_EINVAL se path non
+    *   e' un link)
+    */
+    attributes = GetFileAttributesA(path)
+    if attributes == -1:
+        return win_error(GetLastError())
+    if (attributes & FILE_ATTRIBUTE_REPARSE_POINT) == 0:
+        return WIN_EINVAL
+
+    fd = CreateFileA(path, FILE_READ_ATTRIBUTES as long, FILE_SHARE_ALL as long, 0 as str, OPEN_EXISTING as long, FILE_FLAG_BACKUP_SEMANTICS as long, 0 as long)
+    if fd == -1:
+        return win_error(GetLastError())
+
+    target = rt_alloc_up(OS_PATH_MAX)
+    n = GetFinalPathNameByHandleA(win_handle(fd), target, OS_PATH_MAX, 0)
+    sys_close(fd)
+    if n <= 0 or n >= OS_PATH_MAX:
+        return WIN_EINVAL
+
+    result = target
+    if startswith(target, "\\\\?\\UNC\\"):
+        unsafe:
+            share = (target + 8) as ptr char
+        result = "\\\\" + str_from_c(share)
+    elif startswith(target, "\\\\?\\"):
+        unsafe:
+            local = (target + 4) as ptr char
+        result = str_from_c(local)
+
+    count = long_to_int(strlen(result))
+    if count > size:
+        count = size
+
+    unsafe:
+        out = buf as ptr char
+    i = 0
+    while i < count:
+        out[i] = result[i]
+        i++
+
+    return count
+
+
+def sys_pipe(fds: str) -> int:
+    /*
+    * Crea una pipe, come pipe di Linux; i due fd passano ai processi figli.
+    * argomenti:
+    *   fds: 8 byte in cui scrivere i due fd come int, prima quello di
+    *     lettura e poi quello di scrittura
+    * return: 0, -errno in caso di errore
+    */
+    read_end = 0 as long
+    write_end = 0 as long
+    if CreatePipe(&read_end, &write_end, win_inherit_attributes(), 0) == 0:
+        return win_error(GetLastError())
+
+    unsafe:
+        out = fds as ptr int
+    out[0] = win_low32(read_end)
+    out[1] = win_low32(write_end)
+    return 0
+
+
+def package_manager_name() -> str:
+    /*
+    * Cerca il gestore di pacchetti del sistema: winget e, se manca, choco o
+    * scoop.
+    * return: il comando, "" se non ne trova
+    */
+    if which("winget") != "":
+        return "winget"
+
+    if which("choco") != "":
+        return "choco"
+
+    if which("scoop") != "":
+        return "scoop"
+
+    return ""
+
+
+def win_is_file(path: str) -> int:
+    /*
+    * Controlla se un percorso e' un file che esiste, non una directory.
+    * argomenti:
+    *   path: il percorso
+    * return: 1 se lo e', 0 altrimenti
+    */
+    attributes = GetFileAttributesA(path)
+    return attributes != -1 and (attributes & FILE_ATTRIBUTE_DIRECTORY) == 0
+
+
+def which(name: str) -> str:
+    /*
+    * Cerca un eseguibile nelle cartelle di PATH, come su Linux (qui separate
+    * da ';'); a un nome senza estensione prova quelle di PATHEXT (.EXE, .CMD,
+    * ...). Un nome con '\' o '/' viene solo controllato.
+    * argomenti:
+    *   name: il nome dell'eseguibile
+    * return: il percorso trovato, "" se non c'e'
+    */
+    if name == "":
+        return ""
+
+    if find_char(name, '\\') != -1 or find_char(name, '/') != -1:
+        if win_is_file(name):
+            return name
+        return ""
+
+    extensions = getenv("PATHEXT")
+    if extensions == "":
+        extensions = ".COM;.EXE;.BAT;.CMD"
+
+    has_extension = find_char(name, '.') != -1
+    path = getenv("PATH")
+    offset = 0 as long
+    while offset != -1:
+        offset, dir = split_next(path, ";", offset)
+        if dir == "":
+            continue
+
+        base = dir + "\\" + name
+        if has_extension and win_is_file(base):
+            return base
+
+        ext_offset = 0 as long
+        while ext_offset != -1:
+            ext_offset, extension = split_next(extensions, ";", ext_offset)
+            if extension != "" and win_is_file(base + extension):
+                return base + extension
+
+    return ""
+
+
+def arg_at(index: int) -> str:
+    /*
+    * Restituisce un argomento della riga di comando; con un indice fuori dai
+    * limiti il programma termina con un errore.
+    * argomenti:
+    *   index: l'indice, da 0 (il nome del programma) a arg_count() - 1
+    * return: l'argomento
+    */
+    asminline(
+        push rbx
+        push r12
+        movsxd r12, edi
+        mov rbx, rsp
+        and rsp, -16
+        sub rsp, 32
+        mov rcx, r12
+        mov rdx, [argc]
+        call rt_check_array_bounds
+        mov rsp, rbx
+        mov rax, [argv]
+        mov rax, [rax + r12 * 8]
+        pop r12
+        pop rbx
+    ) endasm
+
+
+def getenv(name: str) -> str:
+    /*
+    * Legge una variabile d'ambiente (GetEnvironmentVariableA); su Windows il
+    * nome non distingue maiuscole e minuscole ("Path" e "PATH" sono la
+    * stessa).
+    * argomenti:
+    *   name: il nome, es. "PATH"
+    * return: il valore, "" se non c'e'
+    */
+    size = 256
+    while 1:
+        value = rt_alloc_up(size as long)
+        n = GetEnvironmentVariableA(name, value, size)
+        if n == 0:
+            return ""
+        if n < size:
+            return value
+        size = n
+
+
+def cwd() -> str:
+    /*
+    * Restituisce la directory di lavoro corrente.
+    * return: il percorso assoluto, "" se non si legge
+    */
+    buf = rt_alloc_up(OS_PATH_MAX)
+    if sys_getcwd(buf, OS_PATH_MAX) < 0:
+        return ""
+
+    return buf
+
+
+def uname_field(offset: int) -> str:
+    /*
+    * Legge un campo di sys_uname.
+    * argomenti:
+    *   offset: l'offset del campo, UTSNAME_OFF_*
+    * return: il campo
+    */
+    buf = rt_alloc_up(UTSNAME_TOTAL_SIZE)
+    sys_uname(buf)
+    unsafe:
+        field = (buf + offset) as ptr char
+    return str_from_c(field)
+
+
+def to_absolute_path(path: str) -> str:
+    /*
+    * Rende assoluto un percorso con GetFullPathNameA, rispetto alla
+    * directory di lavoro (anche "C:" o "\").
+    * argomenti:
+    *   path: il percorso
+    * return: il percorso assoluto: la directory di lavoro se path e' "",
+    *   path stesso se non si risolve
+    */
+    if strlen(path) == 0:
+        return cwd()
+
+    full = rt_alloc_up(OS_PATH_MAX)
+    n = GetFullPathNameA(path, OS_PATH_MAX, full, 0 as long)
+    if n == 0 or n >= OS_PATH_MAX:
+        return path
+
+    return full
+
+
+def exe_path() -> str:
+    /*
+    * Restituisce il percorso del programma in esecuzione.
+    * return: il percorso assoluto, "" in caso di errore
+    */
+    buf = rt_alloc_up(OS_PATH_MAX)
+    n = GetModuleFileNameA(0 as long, buf, OS_PATH_MAX)
+    if n == 0 or n >= OS_PATH_MAX:
+        return ""
+
+    return buf

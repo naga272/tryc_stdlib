@@ -1,0 +1,1480 @@
+
+#include <libstd/dict>
+#include <libstd/string>
+#include <libstd/type>
+#include <libstd/list>
+#include <libstd/file>
+
+/*
+* libstd/json: JSON come json.loads/json.dumps di Python. Ogni valore e'
+* un oggetto Json, con i metodi per leggerlo e modificarlo:
+*
+*     doc = json_load("libreria.json")       // oppure json_parse(testo)
+*     if doc.is_error():
+*         print(doc.error, "\n")
+*         exit(1)
+*     print(doc.get_str("negozio"), "\n")
+*     libri = doc.get("libri")
+*     for i = 0; i < libri.len(); i++:
+*         libro = libri.at(i)
+*         print(libro.get_str("titolo"), " ", libro.get_int("anno"), "\n")
+*     doc.set("aperto", json_bool(0))
+*     print(doc.dumps_indent(4), "\n")
+*
+* LEGGERE: get(chiave) e at(i) danno il Json che sta li'; get_str,
+* get_int, get_float e get_bool (at_str... per gli array) danno
+* direttamente il valore. Una chiave che manca o un indice fuori dai
+* limiti non sono errori: get e at danno un null nuovo, get_str "",
+* get_int 0. has(chiave) dice se la chiave c'e'. Una chiamata per riga:
+* il linguaggio non concatena i metodi (doc.get("a").get("b") non si
+* compila), quindi un livello alla volta in una variabile.
+*
+* SCRIVERE: set(chiave, valore) e push(valori...) prendono una str, un
+* int, un long, un float, un char o un Json. true/false e null si
+* scrivono json_bool(b) e json_null(): il linguaggio non ha un tipo bool
+* distinto (1 == 1 e' un int). Un Json messo in due posti e' lo stesso
+* oggetto in tutti e due, come in Python.
+*
+* ORDINE: le chiavi di un object restano nell'ordine in cui sono
+* arrivate, come i dict di Python: dumps riscrive un file nel suo ordine.
+* Sopra JSON_INDEX_MIN chiavi un object si costruisce un indice (un dict
+* chiave -> posizione), cosi' get resta veloce anche su object grandi.
+*
+* NUMERI: un numero tiene il testo che aveva nel file, e dumps lo
+* riscrive identico (nessun arrotondamento); get_int e get_float lo
+* convertono quando servono.
+*
+* ERRORI: json_parse e json_load non fermano mai il programma. Su un
+* testo sbagliato danno un Json di tipo JSON_ERROR: is_error() e' 1,
+* 'error' dice cosa e dove (riga e colonna), 'error_pos' e' l'indice del
+* byte. Si fermano invece, con un messaggio, gli usi sbagliati
+* della libreria: set su qualcosa che non e' un object, push su
+* qualcosa che non e' un array, un valore che JSON non ha.
+*/
+
+
+#define JSON_NULL 0
+#define JSON_BOOL 1
+#define JSON_NUMBER 2
+#define JSON_STRING 3
+#define JSON_ARRAY 4
+#define JSON_OBJECT 5
+#define JSON_ERROR 6
+
+// array e object annidati che json_parse accetta
+#define JSON_MAX_DEPTH 1000
+
+// chiavi oltre le quali un object usa un indice per get
+#define JSON_INDEX_MIN 8
+
+
+class Json:
+    // JSON_NULL, JSON_BOOL, JSON_NUMBER, JSON_STRING, JSON_ARRAY, JSON_OBJECT o JSON_ERROR
+    kind int
+    // valore di un bool: 0 o 1
+    flag int
+    // elementi di un array o chiavi di un object
+    count int
+    // posti allocati in items e keys
+    cap int
+    // testo di un numero o contenuto di una stringa
+    text str
+    // messaggio di un JSON_ERROR, "" altrimenti
+    error str
+    // byte del testo in cui json_parse si e' fermato
+    error_pos long
+    // valori di un array o di un object (Json)
+    items ref[]
+    // chiavi di un object, nella stessa posizione dei valori
+    keys str[]
+    // dict chiave -> posizione di un object grande, 0 finche' non serve
+    index str
+    is_null &Json_is_null
+    is_bool &Json_is_bool
+    is_number &Json_is_number
+    is_int &Json_is_int
+    is_string &Json_is_string
+    is_array &Json_is_array
+    is_object &Json_is_object
+    is_error &Json_is_error
+    kind_name &Json_kind_name
+    len &Json_len
+    has &Json_has
+    get &Json_get
+    at &Json_at
+    key_at &Json_key_at
+    as_str &Json_as_str
+    as_int &Json_as_int
+    as_float &Json_as_float
+    as_bool &Json_as_bool
+    get_str &Json_get_str
+    get_int &Json_get_int
+    get_float &Json_get_float
+    get_bool &Json_get_bool
+    at_str &Json_at_str
+    at_int &Json_at_int
+    at_float &Json_at_float
+    at_bool &Json_at_bool
+    set &Json_set
+    push &Json_push
+    remove &Json_remove
+    remove_at &Json_remove_at
+    dumps &Json_dumps
+    dumps_indent &Json_dumps_indent
+    save &Json_save
+
+
+/*
+* ============================================================
+* Creare un valore
+* ============================================================
+*/
+
+
+def json_new(kind: int) -> Json:
+    /*
+    * Crea un Json vuoto del tipo dato.
+    * argomenti:
+    *   kind: uno dei JSON_*
+    * return: il Json, con text ed error a ""
+    */
+    j = new Json()
+    j.kind = kind
+    j.text = ""
+    j.error = ""
+    return j
+
+
+def json_null() -> Json:
+    /*
+    * Crea il valore null.
+    * return: un Json di tipo JSON_NULL
+    */
+    return json_new(JSON_NULL)
+
+
+def json_bool(b: int) -> Json:
+    /*
+    * Crea un bool.
+    * argomenti:
+    *   b: 0 per false, qualunque altro valore per true
+    * return: un Json di tipo JSON_BOOL
+    */
+    j = json_new(JSON_BOOL)
+    if b != 0:
+        j.flag = 1
+    return j
+
+
+def json_int(n: long) -> Json:
+    /*
+    * Crea un numero intero.
+    * argomenti:
+    *   n: il valore
+    * return: un Json di tipo JSON_NUMBER
+    */
+    j = json_new(JSON_NUMBER)
+    j.text = itoa(n)
+    return j
+
+
+def json_float_text(x: float) -> str:
+    /*
+    * Scrive un float come numero JSON: sei decimali, senza zeri finali.
+    * argomenti:
+    *   x: il valore
+    * return: il testo, "" per NaN e infinito
+    */
+    t = ftoa(x)
+    if t == "nan" or t == "inf" or t == "-inf":
+        return ""
+    if find_char(t, '.') < 0:
+        return t
+    end = strlen(t)
+    while t[end - 1] == '0':
+        end--
+    if t[end - 1] == '.':
+        end--
+    return substrget(t, end)
+
+
+def json_float(x: float) -> Json:
+    /*
+    * Crea un numero decimale, arrotondato a sei decimali come print.
+    * argomenti:
+    *   x: il valore
+    * return: un Json di tipo JSON_NUMBER, null per NaN e infinito
+    */
+    t = json_float_text(x)
+    if t == "":
+        return json_null()
+    j = json_new(JSON_NUMBER)
+    j.text = t
+    return j
+
+
+def json_str(s: str) -> Json:
+    /*
+    * Crea una stringa.
+    * argomenti:
+    *   s: il contenuto, senza escape
+    * return: un Json di tipo JSON_STRING
+    */
+    j = json_new(JSON_STRING)
+    j.text = s
+    return j
+
+
+def json_object() -> Json:
+    /*
+    * Crea un object vuoto.
+    * return: un Json di tipo JSON_OBJECT
+    */
+    return json_new(JSON_OBJECT)
+
+
+def json_misuse(where: str, what: str) -> None:
+    /*
+    * Ferma il programma per un uso sbagliato della libreria.
+    * argomenti:
+    *   where: la funzione chiamata
+    *   what: cosa non va
+    * return: nessuno (procedura)
+    */
+    fprint(2, "json: " + where + ": " + what + "\n")
+    exit(1)
+
+
+def json_value_of(v: Vararg, where: str) -> Json:
+    /*
+    * Converte un argomento variadico in Json.
+    * argomenti:
+    *   v: l'argomento: str, int, long, float, char o Json
+    *   where: la funzione chiamata, per il messaggio d'errore
+    * return: il Json
+    */
+    if v.tag == 0:
+        return json_str(v.rpayload as str)
+    if v.tag == 1 or v.tag == 2:
+        return json_int(v.payload)
+    if v.tag == 3:
+        s = rt_alloc_up(2 as long)
+        s[0] = int_to_char(long_to_int(v.payload))
+        s[1] = '\0'
+        rt_str_seal(s, 1 as long)
+        return json_str(s)
+    if v.tag == 4:
+        return json_float(v.fpayload)
+    if v.tag == typeid(Json):
+        return v.rpayload as Json
+    json_misuse(where, "the value is not a str, int, long, float, char or Json")
+    return json_null()
+
+
+def json_reserve(j: Json) -> None:
+    /*
+    * Fa posto per un elemento in piu' in un array o in un object.
+    * argomenti:
+    *   j: l'array o l'object
+    * return: nessuno (procedura)
+    */
+    if j.count < j.cap:
+        return
+    cap = j.cap * 2
+    if cap < 4:
+        cap = 4
+    items = new ref[cap]
+    for i = 0; i < j.count; i++:
+        items[i] = j.items[i]
+    j.items = items
+    if j.kind == JSON_OBJECT:
+        keys = new str[cap]
+        for i = 0; i < j.count; i++:
+            keys[i] = j.keys[i]
+        j.keys = keys
+    j.cap = cap
+
+
+def json_append(a: Json, v: Json) -> None:
+    /*
+    * Aggiunge un valore in fondo a un array.
+    * argomenti:
+    *   a: l'array
+    *   v: il valore
+    * return: nessuno (procedura)
+    */
+    json_reserve(a)
+    a.items[a.count] = v
+    a.count++
+
+
+def json_array(*items) -> Json:
+    /*
+    * Crea un array con i valori dati, nell'ordine.
+    * argomenti:
+    *   items: str, int, long, float, char o Json (anche nessuno)
+    * return: un Json di tipo JSON_ARRAY
+    */
+    a = json_new(JSON_ARRAY)
+    n = list_length(items)
+    for i = 0 as long; i < n; i++:
+        json_append(a, json_value_of(list_get(items, i) as Vararg, "json_array"))
+    return a
+
+
+/*
+* ============================================================
+* Le chiavi di un object
+* ============================================================
+*/
+
+
+def json_index_build(obj: Json) -> None:
+    /*
+    * Costruisce l'indice chiave -> posizione di un object.
+    * argomenti:
+    *   obj: l'object
+    * return: nessuno (procedura)
+    */
+    d = dict_new(obj.count * 4)
+    for i = 0; i < obj.count; i++:
+        dict_set(d, obj.keys[i], i)
+    obj.index = d
+
+
+def json_find(obj: Json, key: str) -> int:
+    /*
+    * Cerca una chiave in un object.
+    * argomenti:
+    *   obj: l'object
+    *   key: la chiave
+    * return: la posizione, -1 se non c'e' o se obj non e' un object
+    */
+    if obj.kind != JSON_OBJECT:
+        return -1
+    if obj.count > JSON_INDEX_MIN:
+        if obj.index == 0:
+            json_index_build(obj)
+        return dict_get(obj.index, key)
+    for i = 0; i < obj.count; i++:
+        if obj.keys[i] == key:
+            return i
+    return -1
+
+
+def json_put(obj: Json, key: str, v: Json) -> None:
+    /*
+    * Assegna un valore a una chiave di un object: una chiave nuova va in
+    * fondo, una gia' presente resta al suo posto.
+    * argomenti:
+    *   obj: l'object
+    *   key: la chiave
+    *   v: il valore
+    * return: nessuno (procedura)
+    */
+    i = json_find(obj, key)
+    if i >= 0:
+        obj.items[i] = v
+        return
+    json_reserve(obj)
+    obj.keys[obj.count] = key
+    obj.items[obj.count] = v
+    obj.count++
+    if obj.index != 0:
+        if obj.count * 2 > dict_capacity(obj.index):
+            json_index_build(obj)
+        else:
+            dict_set(obj.index, key, obj.count - 1)
+
+
+/*
+* ============================================================
+* I metodi di Json
+* ============================================================
+*/
+
+
+def Json_is_null(self: Json) -> int:
+    /*
+    * Controlla se il valore e' null (anche quello di una chiave che manca).
+    * return: 1 se null, 0 altrimenti
+    */
+    return self.kind == JSON_NULL
+
+
+def Json_is_bool(self: Json) -> int:
+    /*
+    * Controlla se il valore e' un bool.
+    * return: 1 se bool, 0 altrimenti
+    */
+    return self.kind == JSON_BOOL
+
+
+def Json_is_number(self: Json) -> int:
+    /*
+    * Controlla se il valore e' un numero.
+    * return: 1 se numero, 0 altrimenti
+    */
+    return self.kind == JSON_NUMBER
+
+
+def json_text_is_int(t: str) -> int:
+    /*
+    * Controlla se il testo di un numero e' un intero (senza '.' ne' esponente).
+    * argomenti:
+    *   t: il testo
+    * return: 1 se intero, 0 altrimenti
+    */
+    n = strlen(t)
+    for i = 0 as long; i < n; i++:
+        c = t[i]
+        if c == '.' or c == 'e' or c == 'E':
+            return 0
+    return 1
+
+
+def Json_is_int(self: Json) -> int:
+    /*
+    * Controlla se il valore e' un numero intero (senza '.' ne' esponente).
+    * return: 1 se intero, 0 altrimenti
+    */
+    if self.kind != JSON_NUMBER:
+        return 0
+    return json_text_is_int(self.text)
+
+
+def Json_is_string(self: Json) -> int:
+    /*
+    * Controlla se il valore e' una stringa.
+    * return: 1 se stringa, 0 altrimenti
+    */
+    return self.kind == JSON_STRING
+
+
+def Json_is_array(self: Json) -> int:
+    /*
+    * Controlla se il valore e' un array.
+    * return: 1 se array, 0 altrimenti
+    */
+    return self.kind == JSON_ARRAY
+
+
+def Json_is_object(self: Json) -> int:
+    /*
+    * Controlla se il valore e' un object.
+    * return: 1 se object, 0 altrimenti
+    */
+    return self.kind == JSON_OBJECT
+
+
+def Json_is_error(self: Json) -> int:
+    /*
+    * Controlla se il valore e' l'errore di json_parse o json_load.
+    * return: 1 se errore, 0 altrimenti
+    */
+    return self.kind == JSON_ERROR
+
+
+def Json_kind_name(self: Json) -> str:
+    /*
+    * Il tipo del valore come parola.
+    * return: "null", "bool", "number", "string", "array", "object" o "error"
+    */
+    k = self.kind
+    if k == JSON_NULL:
+        return "null"
+    if k == JSON_BOOL:
+        return "bool"
+    if k == JSON_NUMBER:
+        return "number"
+    if k == JSON_STRING:
+        return "string"
+    if k == JSON_ARRAY:
+        return "array"
+    if k == JSON_OBJECT:
+        return "object"
+    return "error"
+
+
+def Json_len(self: Json) -> int:
+    /*
+    * La lunghezza del valore.
+    * return: elementi di un array, chiavi di un object, byte di una
+    *   stringa; 0 altrimenti
+    */
+    if self.kind == JSON_ARRAY or self.kind == JSON_OBJECT:
+        return self.count
+    if self.kind == JSON_STRING:
+        return long_to_int(strlen(self.text))
+    return 0
+
+
+def Json_has(self: Json, key: str) -> int:
+    /*
+    * Controlla se l'object ha una chiave.
+    * argomenti:
+    *   key: la chiave
+    * return: 1 se c'e', 0 altrimenti
+    */
+    return json_find(self, key) >= 0
+
+
+def Json_get(self: Json, key: str) -> Json:
+    /*
+    * Legge il valore di una chiave dell'object.
+    * argomenti:
+    *   key: la chiave
+    * return: il valore, un null nuovo se la chiave non c'e'
+    */
+    i = json_find(self, key)
+    if i < 0:
+        return json_null()
+    return self.items[i] as Json
+
+
+def Json_at(self: Json, i: int) -> Json:
+    /*
+    * Legge l'elemento i di un array (o il valore in posizione i di un object).
+    * argomenti:
+    *   i: l'indice, da 0
+    * return: il valore, un null nuovo fuori dai limiti
+    */
+    if self.kind != JSON_ARRAY and self.kind != JSON_OBJECT:
+        return json_null()
+    if i < 0 or i >= self.count:
+        return json_null()
+    return self.items[i] as Json
+
+
+def Json_key_at(self: Json, i: int) -> str:
+    /*
+    * Legge la chiave in posizione i di un object.
+    * argomenti:
+    *   i: l'indice, da 0
+    * return: la chiave, "" fuori dai limiti
+    */
+    if self.kind != JSON_OBJECT:
+        return ""
+    if i < 0 or i >= self.count:
+        return ""
+    return self.keys[i]
+
+
+def Json_as_str(self: Json) -> str:
+    /*
+    * Converte il valore in testo.
+    * return: il contenuto di una stringa, il testo di un numero,
+    *   "true"/"false"; "" altrimenti
+    */
+    if self.kind == JSON_STRING or self.kind == JSON_NUMBER:
+        return self.text
+    if self.kind == JSON_BOOL:
+        if self.flag:
+            return "true"
+        return "false"
+    return ""
+
+
+def Json_as_int(self: Json) -> long:
+    /*
+    * Converte il valore in intero.
+    * return: un numero senza decimali (entro i 64 bit), 0/1 per un bool,
+    *   le cifre iniziali di una stringa; 0 altrimenti
+    */
+    if self.kind == JSON_NUMBER:
+        if json_text_is_int(self.text):
+            return str_to_long(self.text)
+        f = str_to_float(self.text)
+        if f >= 9223372036854775808.0:
+            return 9223372036854775807 as long
+        if f < -9223372036854775808.0:
+            return (0 as long) - (9223372036854775807 as long) - (1 as long)
+        return f as long
+    if self.kind == JSON_BOOL:
+        return self.flag as long
+    if self.kind == JSON_STRING:
+        return str_to_long(self.text)
+    return 0 as long
+
+
+def Json_as_float(self: Json) -> float:
+    /*
+    * Converte il valore in float.
+    * return: un numero (anche scritto in una stringa), 0.0/1.0 per un
+    *   bool; 0.0 altrimenti
+    */
+    if self.kind == JSON_NUMBER or self.kind == JSON_STRING:
+        return str_to_float(self.text)
+    if self.kind == JSON_BOOL:
+        return self.flag as float
+    return 0.0
+
+
+def Json_as_bool(self: Json) -> int:
+    /*
+    * Converte il valore in bool, come in Python.
+    * return: 0 per false, 0, "", [], {} e null; 1 altrimenti
+    */
+    k = self.kind
+    if k == JSON_BOOL:
+        return self.flag
+    if k == JSON_NUMBER:
+        return str_to_float(self.text) != 0.0
+    if k == JSON_STRING:
+        return strlen(self.text) > 0
+    if k == JSON_ARRAY or k == JSON_OBJECT:
+        return self.count > 0
+    return 0
+
+
+def Json_get_str(self: Json, key: str) -> str:
+    /*
+    * Legge una chiave dell'object come testo, come get(key).as_str().
+    * argomenti:
+    *   key: la chiave
+    * return: il testo, "" se la chiave non c'e'
+    */
+    return Json_as_str(Json_get(self, key))
+
+
+def Json_get_int(self: Json, key: str) -> long:
+    /*
+    * Legge una chiave dell'object come intero, come get(key).as_int().
+    * argomenti:
+    *   key: la chiave
+    * return: il valore, 0 se la chiave non c'e'
+    */
+    return Json_as_int(Json_get(self, key))
+
+
+def Json_get_float(self: Json, key: str) -> float:
+    /*
+    * Legge una chiave dell'object come float, come get(key).as_float().
+    * argomenti:
+    *   key: la chiave
+    * return: il valore, 0.0 se la chiave non c'e'
+    */
+    return Json_as_float(Json_get(self, key))
+
+
+def Json_get_bool(self: Json, key: str) -> int:
+    /*
+    * Legge una chiave dell'object come bool, come get(key).as_bool().
+    * argomenti:
+    *   key: la chiave
+    * return: 0 o 1, 0 se la chiave non c'e'
+    */
+    return Json_as_bool(Json_get(self, key))
+
+
+def Json_at_str(self: Json, i: int) -> str:
+    /*
+    * Legge l'elemento i come testo, come at(i).as_str().
+    * argomenti:
+    *   i: l'indice, da 0
+    * return: il testo, "" fuori dai limiti
+    */
+    return Json_as_str(Json_at(self, i))
+
+
+def Json_at_int(self: Json, i: int) -> long:
+    /*
+    * Legge l'elemento i come intero, come at(i).as_int().
+    * argomenti:
+    *   i: l'indice, da 0
+    * return: il valore, 0 fuori dai limiti
+    */
+    return Json_as_int(Json_at(self, i))
+
+
+def Json_at_float(self: Json, i: int) -> float:
+    /*
+    * Legge l'elemento i come float, come at(i).as_float().
+    * argomenti:
+    *   i: l'indice, da 0
+    * return: il valore, 0.0 fuori dai limiti
+    */
+    return Json_as_float(Json_at(self, i))
+
+
+def Json_at_bool(self: Json, i: int) -> int:
+    /*
+    * Legge l'elemento i come bool, come at(i).as_bool().
+    * argomenti:
+    *   i: l'indice, da 0
+    * return: 0 o 1, 0 fuori dai limiti
+    */
+    return Json_as_bool(Json_at(self, i))
+
+
+def Json_set(self: Json, key: str, *value) -> None:
+    /*
+    * Assegna un valore a una chiave dell'object: una chiave nuova va in
+    * fondo, una gia' presente resta al suo posto.
+    * argomenti:
+    *   key: la chiave
+    *   value: un solo valore: str, int, long, float, char o Json
+    * return: nessuno (procedura)
+    */
+    if self.kind != JSON_OBJECT:
+        json_misuse("set", "needs an object, not " + Json_kind_name(self))
+    if list_length(value) != 1:
+        json_misuse("set", "needs exactly one value after the key")
+    json_put(self, key, json_value_of(list_get(value, 0) as Vararg, "set"))
+
+
+def Json_push(self: Json, *values) -> None:
+    /*
+    * Aggiunge valori in fondo all'array, nell'ordine.
+    * argomenti:
+    *   values: str, int, long, float, char o Json
+    * return: nessuno (procedura)
+    */
+    if self.kind != JSON_ARRAY:
+        json_misuse("push", "needs an array, not " + Json_kind_name(self))
+    n = list_length(values)
+    for i = 0 as long; i < n; i++:
+        json_append(self, json_value_of(list_get(values, i) as Vararg, "push"))
+
+
+def Json_remove_at(self: Json, i: int) -> int:
+    /*
+    * Toglie l'elemento i di un array (o la chiave in posizione i di un
+    * object); quelli dopo scalano di uno.
+    * argomenti:
+    *   i: l'indice, da 0
+    * return: 1 se tolto, 0 fuori dai limiti
+    */
+    if self.kind != JSON_ARRAY and self.kind != JSON_OBJECT:
+        return 0
+    if i < 0 or i >= self.count:
+        return 0
+    last = self.count - 1
+    for k = i; k < last; k++:
+        self.items[k] = self.items[k + 1]
+    self.items[last] = 0 as ref
+    if self.kind == JSON_OBJECT:
+        for k = i; k < last; k++:
+            self.keys[k] = self.keys[k + 1]
+        self.keys[last] = ""
+        self.index = 0 as str
+    self.count = last
+    return 1
+
+
+def Json_remove(self: Json, key: str) -> int:
+    /*
+    * Toglie una chiave dall'object.
+    * argomenti:
+    *   key: la chiave
+    * return: 1 se c'era, 0 altrimenti
+    */
+    return Json_remove_at(self, json_find(self, key))
+
+
+/*
+* ============================================================
+* Da valore a testo: dumps
+* ============================================================
+*/
+
+
+def json_quote(s: str) -> str:
+    /*
+    * Scrive un testo come stringa JSON, con virgolette ed escape.
+    * argomenti:
+    *   s: il testo
+    * return: la stringa JSON
+    */
+    out = "\""
+    n = strlen(s)
+    start = 0 as long
+    for i = 0 as long; i < n; i++:
+        c = s[i]
+        code = char_to_int(c)
+        if code >= 32 and c != '"' and c != '\\':
+            continue
+        if i > start:
+            out = out + substrget(s + start, i - start)
+        if c == '"':
+            out = out + "\\\""
+        elif c == '\\':
+            out = out + "\\\\"
+        elif c == '\n':
+            out = out + "\\n"
+        elif c == '\r':
+            out = out + "\\r"
+        elif c == '\t':
+            out = out + "\\t"
+        elif code == 8:
+            out = out + "\\b"
+        elif code == 12:
+            out = out + "\\f"
+        else:
+            out = out + "\\u" + long_to_hex(code as long, 4)
+        start = i + 1
+    if n > start:
+        out = out + substrget(s + start, n - start)
+    return out + "\""
+
+
+def json_spaces(n: int) -> str:
+    /*
+    * Crea una stringa di spazi.
+    * argomenti:
+    *   n: quanti spazi
+    * return: la stringa
+    */
+    s = rt_alloc_up((n + 1) as long)
+    for i = 0; i < n; i++:
+        s[i] = ' '
+    s[n] = '\0'
+    rt_str_seal(s, n as long)
+    return s
+
+
+def json_write(v: Json, indent: int, level: int) -> str:
+    /*
+    * Scrive un valore come testo JSON.
+    * argomenti:
+    *   v: il valore
+    *   indent: spazi per livello, 0 per il testo compatto
+    *   level: livello di annidamento di v
+    * return: il testo
+    */
+    k = v.kind
+    if k == JSON_BOOL:
+        if v.flag:
+            return "true"
+        return "false"
+    if k == JSON_NUMBER:
+        return v.text
+    if k == JSON_STRING:
+        return json_quote(v.text)
+    if k != JSON_ARRAY and k != JSON_OBJECT:
+        return "null"
+    if level >= JSON_MAX_DEPTH:
+        json_misuse("dumps", "more than JSON_MAX_DEPTH nested arrays and objects (one that contains itself?)")
+    if v.count == 0:
+        if k == JSON_OBJECT:
+            return "{}"
+        return "[]"
+    inner = ""
+    outer = ""
+    if indent > 0:
+        inner = "\n" + json_spaces(indent * (level + 1))
+        outer = "\n" + json_spaces(indent * level)
+    out = "["
+    if k == JSON_OBJECT:
+        out = "{"
+    for i = 0; i < v.count; i++:
+        if i > 0:
+            out = out + ","
+        out = out + inner
+        if k == JSON_OBJECT:
+            out = out + json_quote(v.keys[i]) + ":"
+            if indent > 0:
+                out = out + " "
+        item = v.items[i] as Json
+        out = out + json_write(item, indent, level + 1)
+    out = out + outer
+    if k == JSON_OBJECT:
+        return out + "}"
+    return out + "]"
+
+
+def Json_dumps(self: Json) -> str:
+    /*
+    * Scrive il valore come testo JSON compatto (un errore diventa null).
+    * return: il testo
+    */
+    return json_write(self, 0, 0)
+
+
+def Json_dumps_indent(self: Json, indent: int) -> str:
+    /*
+    * Scrive il valore come testo JSON con un elemento per riga, come
+    * json.dumps(valore, indent=n) di Python.
+    * argomenti:
+    *   indent: spazi per livello, 0 per il testo compatto
+    * return: il testo, senza a capo finale
+    */
+    return json_write(self, indent, 0)
+
+
+def json_ascii(text: str) -> str:
+    /*
+    * Scrive i caratteri non ASCII di un testo come \uXXXX, come
+    * ensure_ascii di Python.
+    * argomenti:
+    *   text: testo UTF-8, di solito il risultato di dumps
+    * return: il testo, solo ASCII
+    */
+    out = ""
+    n = strlen(text)
+    start = 0 as long
+    i = 0 as long
+    while i < n:
+        b = char_to_int(text[i])
+        if b < 128:
+            i++
+            continue
+        if i > start:
+            out = out + substrget(text + start, i - start)
+        more = 1
+        cp = b & 31
+        if b >= 240:
+            more = 3
+            cp = b & 7
+        elif b >= 224:
+            more = 2
+            cp = b & 15
+        i++
+        while more > 0 and i < n:
+            cp = (cp << 6) | (char_to_int(text[i]) & 63)
+            i++
+            more--
+        if cp >= 0x10000:
+            cp = cp - 0x10000
+            out = out + "\\u" + long_to_hex((0xD800 + (cp >> 10)) as long, 4)
+            out = out + "\\u" + long_to_hex((0xDC00 + (cp & 1023)) as long, 4)
+        else:
+            out = out + "\\u" + long_to_hex(cp as long, 4)
+        start = i
+    if start == 0:
+        return text
+    return out + substrget(text + start, n - start)
+
+
+def Json_save(self: Json, path: str, indent: int) -> int:
+    /*
+    * Scrive il valore in un file, con un a capo finale.
+    * argomenti:
+    *   path: il file, creato o riscritto
+    *   indent: spazi per livello, 0 per il testo compatto
+    * return: 1 se scritto, 0 se il file non si apre o la scrittura fallisce
+    */
+    fd = open(path, "w")
+    if fd < 0:
+        return 0
+    text = json_write(self, indent, 0) + "\n"
+    n = strlen(text)
+    written = 0 as long
+    while written < n:
+        w = sys_write(fd, text + written, n - written)
+        if w <= 0:
+            close(fd)
+            return 0
+        written = written + w
+    close(fd)
+    return 1
+
+
+/*
+* ============================================================
+* Da testo a valore: json_parse
+* ============================================================
+*/
+
+
+class JsonParser:
+    src str
+    pos long
+    len long
+    depth int
+    ok int
+    error str
+    error_pos long
+
+
+def jp_new(text: str) -> JsonParser:
+    /*
+    * Crea un parser all'inizio di un testo.
+    * argomenti:
+    *   text: il testo
+    * return: il parser
+    */
+    p = new JsonParser()
+    p.src = text
+    p.len = strlen(text)
+    p.ok = 1
+    p.error = ""
+    return p
+
+
+def jp_fail(p: JsonParser, msg: str, pos: long) -> None:
+    /*
+    * Registra un errore di analisi; conta solo il primo.
+    * argomenti:
+    *   p: il parser
+    *   msg: il messaggio
+    *   pos: il byte dell'errore
+    * return: nessuno (procedura)
+    */
+    if p.ok == 1:
+        p.ok = 0
+        p.error = msg
+        p.error_pos = pos
+
+
+def jp_peek(p: JsonParser) -> char:
+    /*
+    * Legge il carattere corrente senza consumarlo.
+    * argomenti:
+    *   p: il parser
+    * return: il carattere, '\0' oltre la fine
+    */
+    if p.pos >= p.len:
+        return '\0'
+    return p.src[p.pos]
+
+
+def jp_skip_ws(p: JsonParser) -> None:
+    /*
+    * Salta lo spazio bianco: spazi, tab, a capo e CR.
+    * argomenti:
+    *   p: il parser
+    * return: nessuno (procedura)
+    */
+    while p.pos < p.len:
+        c = p.src[p.pos]
+        if c != ' ' and c != '\n' and c != '\r' and c != '\t':
+            return
+        p.pos++
+
+
+def jp_enter(p: JsonParser) -> int:
+    /*
+    * Entra in un array o in un object annidato.
+    * argomenti:
+    *   p: il parser
+    * return: 1, oppure 0 (con l'errore) oltre JSON_MAX_DEPTH
+    */
+    p.depth++
+    if p.depth > JSON_MAX_DEPTH:
+        jp_fail(p, "too deeply nested", p.pos)
+        return 0
+    return 1
+
+
+def jp_word(p: JsonParser, word: str) -> int:
+    /*
+    * Consuma una parola, se il testo prosegue con quella.
+    * argomenti:
+    *   p: il parser
+    *   word: la parola
+    * return: 1 se consumata, 0 altrimenti
+    */
+    n = strlen(word)
+    if p.pos + n > p.len:
+        return 0
+    for i = 0 as long; i < n; i++:
+        if p.src[p.pos + i] != word[i]:
+            return 0
+    p.pos = p.pos + n
+    return 1
+
+
+def jp_digits(p: JsonParser) -> int:
+    /*
+    * Consuma le cifre decimali.
+    * argomenti:
+    *   p: il parser
+    * return: 1 se ce n'era almeno una, 0 altrimenti
+    */
+    start = p.pos
+    while p.pos < p.len and isnumeric(p.src[p.pos]):
+        p.pos++
+    return p.pos > start
+
+
+def jp_number(p: JsonParser) -> Json:
+    /*
+    * Legge un numero, tenendone il testo.
+    * argomenti:
+    *   p: il parser, sul '-' o sulla prima cifra
+    * return: un Json di tipo JSON_NUMBER, un null su errore
+    */
+    start = p.pos
+    if jp_peek(p) == '-':
+        p.pos++
+    if jp_peek(p) == '0':
+        p.pos++
+    elif jp_digits(p) == 0:
+        jp_fail(p, "invalid number", start)
+        return json_null()
+    if jp_peek(p) == '.':
+        p.pos++
+        if jp_digits(p) == 0:
+            jp_fail(p, "invalid number: expected digit after '.'", p.pos)
+            return json_null()
+    c = jp_peek(p)
+    if c == 'e' or c == 'E':
+        p.pos++
+        c = jp_peek(p)
+        if c == '+' or c == '-':
+            p.pos++
+        if jp_digits(p) == 0:
+            jp_fail(p, "invalid number: expected digit in exponent", p.pos)
+            return json_null()
+    j = json_new(JSON_NUMBER)
+    j.text = substrget(p.src + start, p.pos - start)
+    return j
+
+
+def jp_hex4(p: JsonParser, pos: long) -> int:
+    /*
+    * Legge 4 cifre esadecimali.
+    * argomenti:
+    *   p: il parser
+    *   pos: il byte in cui cominciano
+    * return: il valore, -1 se non sono 4 cifre esadecimali
+    */
+    if pos + 4 > p.len:
+        return -1
+    v = 0
+    for k = 0 as long; k < 4; k++:
+        d = hex_digit_value(p.src[pos + k])
+        if d < 0:
+            return -1
+        v = v * 16 + d
+    return v
+
+
+def json_utf8_encode_into(buf: str, pos: long, codepoint: int) -> long:
+    /*
+    * Scrive un codepoint in UTF-8, da 1 a 4 byte.
+    * argomenti:
+    *   buf: il buffer, con almeno 4 byte liberi da pos
+    *   pos: dove scrivere
+    *   codepoint: il codepoint, da 0 a 0x10FFFF
+    * return: la posizione dopo l'ultimo byte scritto
+    */
+    if codepoint < 128:
+        buf[pos] = int_to_char(codepoint)
+        return pos + 1
+    if codepoint < 2048:
+        buf[pos] = int_to_char(192 + (codepoint >> 6))
+        buf[pos + 1] = int_to_char(128 + (codepoint & 63))
+        return pos + 2
+    if codepoint < 65536:
+        buf[pos] = int_to_char(224 + (codepoint >> 12))
+        buf[pos + 1] = int_to_char(128 + ((codepoint >> 6) & 63))
+        buf[pos + 2] = int_to_char(128 + (codepoint & 63))
+        return pos + 3
+    buf[pos] = int_to_char(240 + (codepoint >> 18))
+    buf[pos + 1] = int_to_char(128 + ((codepoint >> 12) & 63))
+    buf[pos + 2] = int_to_char(128 + ((codepoint >> 6) & 63))
+    buf[pos + 3] = int_to_char(128 + (codepoint & 63))
+    return pos + 4
+
+
+def jp_string(p: JsonParser) -> str:
+    /*
+    * Legge una stringa e ne decodifica gli escape.
+    * argomenti:
+    *   p: il parser, sulle virgolette
+    * return: il contenuto, "" su errore
+    */
+    start = p.pos
+    i = start + 1
+    escapes = 0
+    while i < p.len:
+        c = p.src[i]
+        if c == '"':
+            break
+        if c == '\\':
+            escapes = 1
+            i = i + 2
+        elif char_to_int(c) < 32:
+            jp_fail(p, "invalid control character in string", i)
+            return ""
+        else:
+            i++
+    if i >= p.len:
+        jp_fail(p, "unterminated string", start)
+        return ""
+    end = i
+    p.pos = end + 1
+    if escapes == 0:
+        return substrget(p.src + start + 1, end - start - 1)
+
+    out = rt_alloc_up(end - start)
+    w = 0 as long
+    i = start + 1
+    while i < end:
+        c = p.src[i]
+        if c != '\\':
+            out[w] = c
+            w++
+            i++
+            continue
+        e = p.src[i + 1]
+        if e == '"' or e == '\\' or e == '/':
+            out[w] = e
+        elif e == 'b':
+            out[w] = int_to_char(8)
+        elif e == 'f':
+            out[w] = int_to_char(12)
+        elif e == 'n':
+            out[w] = '\n'
+        elif e == 'r':
+            out[w] = '\r'
+        elif e == 't':
+            out[w] = '\t'
+        elif e == 'u':
+            cp = jp_hex4(p, i + 2)
+            if cp < 0:
+                jp_fail(p, "invalid \\u escape", i)
+                return ""
+            i = i + 6
+            if cp >= 0xD800 and cp <= 0xDBFF and i + 6 <= end and p.src[i] == '\\' and p.src[i + 1] == 'u':
+                low = jp_hex4(p, i + 2)
+                if low >= 0xDC00 and low <= 0xDFFF:
+                    cp = 0x10000 + ((cp - 0xD800) << 10) + (low - 0xDC00)
+                    i = i + 6
+            w = json_utf8_encode_into(out, w, cp)
+            continue
+        else:
+            jp_fail(p, "invalid escape sequence", i)
+            return ""
+        w++
+        i = i + 2
+    out[w] = '\0'
+    rt_str_seal(out, w)
+    return out
+
+
+def jp_array(p: JsonParser) -> Json:
+    /*
+    * Legge un array.
+    * argomenti:
+    *   p: il parser, su '['
+    * return: l'array
+    */
+    a = json_new(JSON_ARRAY)
+    if jp_enter(p) == 0:
+        return a
+    p.pos++
+    jp_skip_ws(p)
+    if jp_peek(p) == ']':
+        p.pos++
+        p.depth--
+        return a
+    while 1:
+        v = jp_value(p)
+        if p.ok == 0:
+            return a
+        json_append(a, v)
+        jp_skip_ws(p)
+        c = jp_peek(p)
+        if c == ',':
+            p.pos++
+        elif c == ']':
+            p.pos++
+            break
+        else:
+            jp_fail(p, "expected ',' or ']' in array", p.pos)
+            return a
+    p.depth--
+    return a
+
+
+def jp_object(p: JsonParser) -> Json:
+    /*
+    * Legge un object.
+    * argomenti:
+    *   p: il parser, su '{'
+    * return: l'object
+    */
+    o = json_new(JSON_OBJECT)
+    if jp_enter(p) == 0:
+        return o
+
+    p.pos++
+    jp_skip_ws(p)
+    if jp_peek(p) == '}':
+        p.pos++
+        p.depth--
+        return o
+
+    while 1:
+        jp_skip_ws(p)
+        if jp_peek(p) != '"':
+            jp_fail(p, "expected string key", p.pos)
+            return o
+
+        key = jp_string(p)
+        if p.ok == 0:
+            return o
+
+        jp_skip_ws(p)
+        if jp_peek(p) != ':':
+            jp_fail(p, "expected ':' after key", p.pos)
+            return o
+
+        p.pos++
+        v = jp_value(p)
+        if p.ok == 0:
+            return o
+
+        json_put(o, key, v)
+        jp_skip_ws(p)
+        c = jp_peek(p)
+        if c == ',':
+            p.pos++
+        elif c == '}':
+            p.pos++
+            break
+        else:
+            jp_fail(p, "expected ',' or '}'", p.pos)
+            return o
+    p.depth--
+    return o
+
+
+def jp_value(p: JsonParser) -> Json:
+    /*
+    * Legge un valore qualunque, dopo lo spazio bianco.
+    * argomenti:
+    *   p: il parser
+    * return: il valore, un null su errore
+    */
+    jp_skip_ws(p)
+    if p.pos >= p.len:
+        jp_fail(p, "unexpected end of input", p.pos)
+        return json_null()
+    c = p.src[p.pos]
+    if c == '{':
+        return jp_object(p)
+
+    if c == '[':
+        return jp_array(p)
+
+    if c == '"':
+        return json_str(jp_string(p))
+
+    if c == '-' or isnumeric(c):
+        return jp_number(p)
+
+    if c == 't':
+        if jp_word(p, "true"):
+            return json_bool(1)
+        jp_fail(p, "invalid literal, expected 'true'", p.pos)
+        return json_null()
+
+    if c == 'f':
+        if jp_word(p, "false"):
+            return json_bool(0)
+        jp_fail(p, "invalid literal, expected 'false'", p.pos)
+        return json_null()
+
+    if c == 'n':
+        if jp_word(p, "null"):
+            return json_null()
+
+        jp_fail(p, "invalid literal, expected 'null'", p.pos)
+        return json_null()
+
+    jp_fail(p, "unexpected character", p.pos)
+    return json_null()
+
+
+def json_error_at(src: str, msg: str, pos: long) -> Json:
+    /*
+    * Crea un JSON_ERROR con la riga e la colonna (in caratteri) di pos.
+    * argomenti:
+    *   src: il testo analizzato
+    *   msg: il messaggio
+    *   pos: il byte dell'errore
+    * return: un Json di tipo JSON_ERROR
+    */
+    line = 1
+    col = 1
+    for i = 0 as long; i < pos; i++:
+        b = char_to_int(src[i])
+        if b == 10:
+            line++
+            col = 1
+        elif (b & 0xC0) != 0x80:
+            col++
+    j = json_new(JSON_ERROR)
+    j.error = msg + " at line " + itoa(line) + ", column " + itoa(col)
+    j.error_pos = pos
+    return j
+
+
+def json_parse(text: str) -> Json:
+    /*
+    * Analizza un testo JSON, come json.loads di Python. Salta un BOM
+    * UTF-8 iniziale.
+    * argomenti:
+    *   text: il testo
+    * return: il valore, o un JSON_ERROR con error ed error_pos
+    */
+    p = jp_new(text)
+    if p.len >= 3 and char_to_int(text[0]) == 0xEF and char_to_int(text[1]) == 0xBB and char_to_int(text[2]) == 0xBF:
+        p.pos = 3
+
+    v = jp_value(p)
+    if p.ok == 1:
+        jp_skip_ws(p)
+        if p.pos < p.len:
+            jp_fail(p, "trailing data after JSON value", p.pos)
+
+    if p.ok == 0:
+        return json_error_at(text, p.error, p.error_pos)
+    return v
+
+
+def json_number(text: str) -> Json:
+    /*
+    * Crea un numero dal suo testo, che dumps riscrive com'e' (es. "8.50").
+    * argomenti:
+    *   text: un numero JSON; un testo non valido ferma il programma
+    * return: un Json di tipo JSON_NUMBER
+    */
+    p = jp_new(text)
+    v = json_null()
+    if p.len > 0 and (p.src[0] == '-' or isnumeric(p.src[0])):
+        v = jp_number(p)
+
+    if p.ok == 0 or p.pos != p.len or v.kind != JSON_NUMBER:
+        json_misuse("json_number", "not a JSON number: " + text)
+    return v
+
+
+def json_load(path: str) -> Json:
+    /*
+    * Legge e analizza un file JSON, come json.load di Python.
+    * argomenti:
+    *   path: il file
+    * return: il valore, o un JSON_ERROR se il file non si legge o non e'
+    *   JSON valido
+    */
+    fd = open(path, "r")
+    if fd < 0:
+        j = json_new(JSON_ERROR)
+        j.error = "cannot open " + path
+        return j
+
+    size = get_size_file(fd)
+    buf = rt_alloc_up(size + 1)
+    got = 0 as long
+    while got < size:
+        n = sys_read(fd, buf + got, size - got)
+        if n < 0:
+            close(fd)
+            j = json_new(JSON_ERROR)
+            j.error = "cannot read " + path
+            return j
+
+        if n == 0:
+            break
+
+        got = got + n
+
+    close(fd)
+    buf[got] = '\0'
+    rt_str_seal(buf, got)
+    return json_parse(buf)

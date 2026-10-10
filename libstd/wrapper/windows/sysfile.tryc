@@ -1,0 +1,629 @@
+libextern <kernel32.dll>
+libextern <KernelBase.dll>
+
+/*
+* Windows x64: le sys_* dei file (vedi wrapper/linux/sysfile) con
+* kernel32. I file descriptor restano int e gli errori -errno, come su
+* Linux (vedi wrapper/windows/kernel32); flag, permessi e Stat hanno gli
+* stessi valori e lo stesso layout. sys_shutdown e' delle socket: sta in
+* wrapper/windows/sysnet.
+*/
+
+#include <libstd/wrapper/windows/kernel32>
+
+#ifndef O_CREAT
+#define O_CREAT 0o100   // ottale = 64
+#endif
+
+#ifndef O_TRUNC
+#define O_TRUNC 0o1000  // ottale = 512
+#endif
+
+#ifndef O_EXCL
+#define O_EXCL 0o200   // con O_CREAT: fallisce se il file esiste (CREATE_NEW)
+#endif
+
+#ifndef O_NOCTTY
+// Windows non ha un terminale di controllo: sys_open lo ignora
+#define O_NOCTTY 0o400
+#endif
+
+#ifndef O_APPEND
+#define O_APPEND 0o2000  // ottale = 1024
+#endif
+
+// Access mode
+#ifndef O_RDONLY
+#define O_RDONLY      0    // sola lettura
+#endif
+
+#ifndef O_WRONLY
+#define O_WRONLY      1    // sola scrittura
+#endif
+
+#ifndef O_RDWR
+#define O_RDWR        2    // lettura e scrittura
+#endif
+
+#ifndef O_ACCMODE
+#define O_ACCMODE     3    // mask per i 3 sopra
+#endif
+
+#ifndef CLASSIS
+#define CLASSIS 420   // lettura / scrittura file di testo classici
+#endif
+
+#ifndef O_OWNER
+#define O_OWNER 384   // solo owner
+#endif
+
+#ifndef CLASSIC
+#define CLASSIC 420   // lettura / scrittura file di testo classici
+#endif
+
+#ifndef BINARY
+#define BINARY  493   // eseguibile pubblico
+#endif
+
+#ifndef S_IXUSR
+#define S_IXUSR 64    // execute by owner
+#endif
+
+#ifndef S_IWUSR
+#define S_IWUSR 128   // write by owner
+#endif
+
+#ifndef S_IRUSR
+#define S_IRUSR 256   // read by owner
+#endif
+
+#ifndef S_IXGRP
+#define S_IXGRP 8    // execute by group
+#endif
+
+#ifndef S_IWGRP
+#define S_IWGRP 16   // write by group
+#endif
+
+#ifndef S_IRGRP
+#define S_IRGRP 32   // read by group
+#endif
+
+#ifndef S_IXOTH
+#define S_IXOTH 1   // execute by others
+#endif
+
+#ifndef S_IWOTH
+#define S_IWOTH 2   // write by others
+#endif
+
+#ifndef S_IROTH
+#define S_IROTH 4   // read by others
+#endif
+
+// tipo del file in st_mode
+#ifndef S_IFIFO
+#define S_IFIFO 4096     // pipe
+#endif
+
+#ifndef S_IFCHR
+#define S_IFCHR 8192     // dispositivo a caratteri (la console)
+#endif
+
+#ifndef S_IFDIR
+#define S_IFDIR 16384    // directory
+#endif
+
+#ifndef S_IFREG
+#define S_IFREG 32768    // file normale
+#endif
+
+#ifndef S_IFMT
+#define S_IFMT 61440     // mask per i tipi sopra
+#endif
+
+// File status flags: su Windows contano O_APPEND e O_DIRECTORY
+#ifndef O_NONBLOCK
+#define O_NONBLOCK    2048    // I/O non bloccante
+#endif
+
+#ifndef O_DSYNC
+#define O_DSYNC       4096    // scritture sincrone (data)
+#endif
+
+#ifndef FASYNC
+#define FASYNC        8192    // notifica asincrona (obsolete)
+#endif
+
+#ifndef O_DIRECT
+#define O_DIRECT      16384    // I/O diretto (salta il cache)
+#endif
+
+#ifndef O_LARGEFILE
+#define O_LARGEFILE   32768    // (compatibilità 32-bit)
+#endif
+
+#ifndef O_DIRECTORY
+#define O_DIRECTORY   65536     // deve essere una directory
+#endif
+
+#ifndef O_NOFOLLOW
+#define O_NOFOLLOW    131072    // non seguire symlink
+#endif
+
+#ifndef O_CLOEXEC
+#define O_CLOEXEC     524288    // close-on-exec (FD_CLOEXEC)
+#endif
+
+// sys_access
+#ifndef F_OK
+#define F_OK 0    // il file esiste
+#endif
+
+#ifndef R_OK
+#define R_OK 4
+#endif
+
+#ifndef W_OK
+#define W_OK 2
+#endif
+
+// sys_shutdown (wrapper/windows/sysnet): gli stessi valori di SD_* di Winsock
+#ifndef SHUT_RD
+#define SHUT_RD 0
+#endif
+
+#ifndef SHUT_WR
+#define SHUT_WR 1
+#endif
+
+#ifndef SHUT_RDWR
+#define SHUT_RDWR 2
+#endif
+
+#ifndef FIONREAD
+#define FIONREAD 21531
+#endif
+
+// CreateFileA
+#define GENERIC_READ 2147483648
+#define GENERIC_WRITE 1073741824
+#define FILE_APPEND_DATA 4
+#define FILE_READ_ATTRIBUTES 128
+#define FILE_SHARE_ALL 7          // read, write, delete: come un fd di Linux
+#define CREATE_NEW 1
+#define CREATE_ALWAYS 2
+#define OPEN_EXISTING 3
+#define OPEN_ALWAYS 4
+#define TRUNCATE_EXISTING 5
+#define FILE_ATTRIBUTE_READONLY 1
+#define FILE_ATTRIBUTE_DIRECTORY 16
+#define FILE_ATTRIBUTE_NORMAL 128
+#define FILE_FLAG_BACKUP_SEMANTICS 33554432   // per aprire una directory
+
+// GetFileType e FILE_TYPE_*: in wrapper/windows/kernel32
+
+// SetFilePointerEx
+#define FILE_BEGIN 0
+#define FILE_CURRENT 1
+
+// DuplicateHandle
+#define DUPLICATE_SAME_ACCESS 2
+
+// byte di BY_HANDLE_FILE_INFORMATION (52, arrotondati)
+#define BY_HANDLE_FILE_INFORMATION_SIZE 56
+
+
+/*
+* Lo stesso layout di wrapper/linux/sysfile (144 byte). Su Windows:
+* st_dev e' il numero di serie del volume, st_ino l'indice del file,
+* st_ctime la data di creazione; uid, gid e rdev sono 0.
+*/
+class Stat --no-padding:
+    st_dev          long
+    st_ino          long
+    st_nlink        long
+    st_mode         int
+    st_uid          int
+    st_gid          int
+    pad0            int
+    st_rdev         long
+    st_size         long
+    st_blksize      long
+    st_blocks       long
+    st_atime        long
+    st_atime_nsec   long
+    st_mtime        long
+    st_mtime_nsec   long
+    st_ctime        long
+    st_ctime_nsec   long
+    reserved0       long
+    reserved1       long
+    reserved2       long
+
+
+// l'HANDLE torna come int: vedi win_handle
+extern def CreateFileA(name: str, access: long, share_mode: long, security_attributes: str, creation: long, flags: long, template: long) -> int
+extern def GetFileInformationByHandle(file: long, info: str) -> int
+extern def GetFileAttributesA(name: str) -> int
+extern def GetFileSizeEx(file: long, size: &long) -> int
+extern def SetFilePointerEx(file: long, distance: long, new_pointer: &long, method: int) -> int
+extern def PeekNamedPipe(pipe: long, buffer: long, size: int, read: long, available: &int, left: long) -> int
+extern def DuplicateHandle(source_process: long, source: long, target_process: long, target: str, access: int, inherit: int, options: int) -> int
+
+
+def win_stat_clear(statbuf: Stat) -> None:
+    /*
+    * Azzera tutti i campi di uno Stat.
+    * argomenti:
+    *   statbuf: lo Stat
+    * return: nessuno (procedura)
+    */
+    statbuf.st_dev = 0 as long
+    statbuf.st_ino = 0 as long
+    statbuf.st_nlink = 0 as long
+    statbuf.st_mode = 0
+    statbuf.st_uid = 0
+    statbuf.st_gid = 0
+    statbuf.pad0 = 0
+    statbuf.st_rdev = 0 as long
+    statbuf.st_size = 0 as long
+    statbuf.st_blksize = 0 as long
+    statbuf.st_blocks = 0 as long
+    statbuf.st_atime = 0 as long
+    statbuf.st_atime_nsec = 0 as long
+    statbuf.st_mtime = 0 as long
+    statbuf.st_mtime_nsec = 0 as long
+    statbuf.st_ctime = 0 as long
+    statbuf.st_ctime_nsec = 0 as long
+    statbuf.reserved0 = 0 as long
+    statbuf.reserved1 = 0 as long
+    statbuf.reserved2 = 0 as long
+
+
+def sys_ioctl(fd: int, request: int, argp: &int) -> int:
+    /*
+    * Come ioctl di Linux, solo per FIONREAD e non per le socket: i byte che
+    * si leggono subito da una pipe, o quelli che restano da leggere in un
+    * file.
+    * argomenti:
+    *   fd: il file descriptor
+    *   request: FIONREAD
+    *   argp: dove scrivere il numero di byte
+    * return: 0, -errno in caso di errore
+    */
+    if request != FIONREAD:
+        return WIN_EINVAL
+
+    handle = win_handle(fd)
+    kind = GetFileType(handle)
+    if kind == FILE_TYPE_PIPE:
+        if PeekNamedPipe(handle, 0 as long, 0, 0 as long, argp, 0 as long) == 0:
+            return win_error(GetLastError())
+        return 0
+
+    if kind == FILE_TYPE_DISK:
+        size = 0 as long
+        position = 0 as long
+        if GetFileSizeEx(handle, &size) == 0:
+            return win_error(GetLastError())
+        if SetFilePointerEx(handle, 0 as long, &position, FILE_CURRENT) == 0:
+            return win_error(GetLastError())
+        left = size - position
+        if left > 2147483647 as long:
+            left = 2147483647 as long
+        argp[0] = win_low32(left)
+        return 0
+
+    return WIN_EINVAL
+
+
+def sys_access(path_file: str, mode: int) -> int:
+    /*
+    * Come access di Linux: controlla che il file esista e, con W_OK, che sia
+    * scrivibile. Windows non ha il permesso di esecuzione: X_OK vale per ogni
+    * file.
+    * argomenti:
+    *   path_file: il percorso
+    *   mode: F_OK, oppure R_OK, W_OK e X_OK in OR
+    * return: 0 se l'accesso e' consentito, -errno altrimenti
+    */
+    attributes = GetFileAttributesA(path_file)
+    if attributes == -1:
+        return win_error(GetLastError())
+
+    if (mode & W_OK) != 0 and (attributes & FILE_ATTRIBUTE_READONLY) != 0:
+        if (attributes & FILE_ATTRIBUTE_DIRECTORY) == 0:
+            return WIN_EACCES
+
+    return 0
+
+
+def win_inherit_attributes() -> str:
+    /*
+    * Prepara un SECURITY_ATTRIBUTES con bInheritHandle: l'handle passa ai
+    * processi figli (fork, system) con lo stesso valore, come un fd su Linux.
+    * return: il buffer
+    */
+    attributes = rt_alloc_up(24)
+    unsafe:
+        words = attributes as ptr long
+    words[0] = 24 as long
+    words[1] = 0 as long
+    words[2] = 1 as long
+    return attributes
+
+
+def sys_open(path: str, flags: int, mode: int) -> int:
+    /*
+    * Come open di Linux, con CreateFileA. Dei flag contano il modo
+    * d'accesso, O_CREAT, O_EXCL, O_TRUNC, O_APPEND (ogni scrittura va in
+    * fondo), O_DIRECTORY e O_CLOEXEC (senza, il fd passa ai processi figli
+    * come su Linux). Di mode conta S_IWUSR alla creazione: senza, il file
+    * nasce in sola lettura.
+    * argomenti:
+    *   path: il percorso, assoluto o relativo
+    *   flags: i flag di apertura, es. O_RDONLY, O_WRONLY, O_APPEND
+    *   mode: i permessi del file, se viene creato
+    * return: il file descriptor, -errno in caso di errore
+    */
+    access = FILE_READ_ATTRIBUTES as long
+    access_mode = flags & O_ACCMODE
+    if access_mode == O_RDONLY or access_mode == O_RDWR:
+        access = access | (GENERIC_READ as long)
+    if access_mode == O_WRONLY or access_mode == O_RDWR:
+        if (flags & O_APPEND) != 0:
+            access = access | (FILE_APPEND_DATA as long) | (SYNCHRONIZE as long)
+        else:
+            access = access | (GENERIC_WRITE as long)
+
+    creation = OPEN_EXISTING
+    if (flags & O_CREAT) != 0:
+        if (flags & O_EXCL) != 0:
+            creation = CREATE_NEW
+        elif (flags & O_TRUNC) != 0:
+            creation = CREATE_ALWAYS
+        else:
+            creation = OPEN_ALWAYS
+    elif (flags & O_TRUNC) != 0:
+        creation = TRUNCATE_EXISTING
+
+    attributes = FILE_ATTRIBUTE_NORMAL
+    if (flags & O_CREAT) != 0 and (mode & S_IWUSR) == 0:
+        attributes = FILE_ATTRIBUTE_READONLY
+    if (flags & O_DIRECTORY) != 0:
+        attributes = attributes | FILE_FLAG_BACKUP_SEMANTICS
+
+    security = win_inherit_attributes()
+    if (flags & O_CLOEXEC) != 0:
+        security = 0 as str
+
+    fd = CreateFileA(path, access, FILE_SHARE_ALL as long, security, creation as long, attributes as long, 0 as long)
+    if fd == -1:
+        return win_error(GetLastError())
+
+    return fd
+
+
+def sys_close(fd: int) -> None:
+    /*
+    * Chiude un file descriptor, anche una socket (con closesocket:
+    * CloseHandle non libera quello che Winsock tiene per la socket).
+    * argomenti:
+    *   fd: il file descriptor
+    * return: nessuno (procedura)
+    */
+    if win_is_socket(fd) != 0:
+        unsafe:
+            ws_closesocket = winsock_fn("closesocket") as &(long) -> int
+        ws_closesocket(fd)
+    else:
+        CloseHandle(win_handle(fd))
+
+
+def sys_stat(path: str, statbuf: Stat) -> int:
+    /*
+    * Come stat di Linux: le informazioni di un file dal suo percorso (vedi
+    * sys_fstat).
+    * argomenti:
+    *   path: il percorso
+    *   statbuf: lo Stat da riempire
+    * return: 0, -errno in caso di errore
+    */
+    fd = CreateFileA(path, FILE_READ_ATTRIBUTES as long, FILE_SHARE_ALL as long, 0 as str, OPEN_EXISTING as long, FILE_FLAG_BACKUP_SEMANTICS as long, 0 as long)
+    if fd == -1:
+        return win_error(GetLastError())
+
+    result = sys_fstat(fd, statbuf)
+    sys_close(fd)
+    return result
+
+
+def sys_fstat(fd: int, statbuf: Stat) -> int:
+    /*
+    * Come fstat di Linux: le informazioni di un file aperto. Per la console
+    * st_mode e' S_IFCHR; per una pipe e' S_IFIFO e st_size sono i byte gia'
+    * arrivati. st_dev e' il numero di serie del volume, st_ino l'indice del
+    * file, st_ctime la data di creazione.
+    * argomenti:
+    *   fd: il file descriptor
+    *   statbuf: lo Stat da riempire
+    * return: 0, -errno in caso di errore
+    */
+    handle = win_handle(fd)
+    kind = GetFileType(handle)
+    if kind == FILE_TYPE_UNKNOWN:
+        err = GetLastError()
+        if err != 0:
+            return win_error(err)
+
+    win_stat_clear(statbuf)
+    statbuf.st_nlink = 1 as long
+    statbuf.st_blksize = 4096 as long
+
+    if kind == FILE_TYPE_CHAR:
+        statbuf.st_mode = S_IFCHR | S_IRUSR | S_IWUSR
+        return 0
+
+    if kind == FILE_TYPE_PIPE:
+        statbuf.st_mode = S_IFIFO | S_IRUSR | S_IWUSR
+        available = 0
+        if PeekNamedPipe(handle, 0 as long, 0, 0 as long, &available, 0 as long) != 0:
+            statbuf.st_size = win_u32(available)
+        return 0
+
+    if kind != FILE_TYPE_DISK:
+        return 0
+
+    info = rt_alloc_up(BY_HANDLE_FILE_INFORMATION_SIZE)
+    if GetFileInformationByHandle(handle, info) == 0:
+        return win_error(GetLastError())
+
+    unsafe:
+        w = info as ptr int
+    attributes = w[0]
+    if (attributes & FILE_ATTRIBUTE_DIRECTORY) != 0:
+        statbuf.st_mode = S_IFDIR | 493
+    elif (attributes & FILE_ATTRIBUTE_READONLY) != 0:
+        statbuf.st_mode = S_IFREG | 292
+    else:
+        statbuf.st_mode = S_IFREG | 420
+
+    statbuf.st_dev = win_u32(w[7])
+    statbuf.st_ino = win_u64(w[11], w[12])
+    statbuf.st_nlink = win_u32(w[10])
+    statbuf.st_size = win_u64(w[8], w[9])
+    statbuf.st_blocks = (statbuf.st_size + (511 as long)) / (512 as long)
+
+    second = 10000000 as long
+    t = win_unix_time(w[2], w[1])
+    statbuf.st_ctime = t / second
+    statbuf.st_ctime_nsec = (t % second) * (100 as long)
+    t = win_unix_time(w[4], w[3])
+    statbuf.st_atime = t / second
+    statbuf.st_atime_nsec = (t % second) * (100 as long)
+    t = win_unix_time(w[6], w[5])
+    statbuf.st_mtime = t / second
+    statbuf.st_mtime_nsec = (t % second) * (100 as long)
+    return 0
+
+
+def sys_pread64(fd: int, buf: str, count: int, offset: int) -> int:
+    /*
+    * Legge da una posizione del file senza spostare quella corrente: Windows
+    * la sposta, quindi la funzione poi la rimette dov'era.
+    * argomenti:
+    *   fd: il file descriptor
+    *   buf: dove scrivere i byte
+    *   count: quanti byte leggere al massimo
+    *   offset: la posizione nel file
+    * return: i byte letti, -errno in caso di errore
+    */
+    handle = win_handle(fd)
+    saved = 0 as long
+    moved = 0 as long
+    if SetFilePointerEx(handle, 0 as long, &saved, FILE_CURRENT) == 0:
+        return win_error(GetLastError())
+    if SetFilePointerEx(handle, offset as long, &moved, FILE_BEGIN) == 0:
+        return win_error(GetLastError())
+
+    n = sys_read(fd, buf, count as long)
+    SetFilePointerEx(handle, saved, &moved, FILE_BEGIN)
+    return n
+
+
+def win_duplicate(fd: int, inherit: int) -> long:
+    /*
+    * Crea un altro HANDLE per lo stesso file, con la stessa posizione
+    * (DuplicateHandle).
+    * argomenti:
+    *   fd: il file descriptor
+    *   inherit: 1 se il nuovo HANDLE deve passare ai processi figli
+    * return: l'HANDLE, 0 in caso di errore (l'errore in GetLastError)
+    */
+    target = rt_alloc_up(8)
+    process = GetCurrentProcess()
+    if DuplicateHandle(process, win_handle(fd), process, target, 0, inherit, DUPLICATE_SAME_ACCESS) == 0:
+        return 0 as long
+
+    unsafe:
+        words = target as ptr long
+    return words[0]
+
+
+def sys_dup(fd: int) -> int:
+    /*
+    * Duplica un file descriptor: il nuovo condivide file e posizione e passa
+    * ai processi figli, come su Linux.
+    * argomenti:
+    *   fd: il file descriptor
+    * return: il nuovo fd, -errno in caso di errore
+    */
+    handle = win_duplicate(fd, 1)
+    if handle == 0 as long:
+        return win_error(GetLastError())
+
+    return win_low32(handle)
+
+
+def win_dup_std(old_fd: int, new_fd: int, inherit: int) -> int:
+    /*
+    * Duplica old_fd in uno degli fd standard, per sys_dup2 e sys_dup3: su
+    * Windows l'HANDLE non si sceglie, quindi new_fd puo' essere solo 0, 1 o 2
+    * (SetStdHandle). Il vecchio HANDLE di new_fd viene chiuso.
+    * argomenti:
+    *   old_fd: il file descriptor da duplicare
+    *   new_fd: 0, 1 o 2
+    *   inherit: 1 se il nuovo deve passare ai processi figli
+    * return: new_fd, -errno in caso di errore
+    */
+    if new_fd < 0 or new_fd > 2:
+        return WIN_EINVAL
+
+    handle = win_duplicate(old_fd, inherit)
+    if handle == 0 as long:
+        return win_error(GetLastError())
+
+    previous = win_handle(new_fd)
+    SetStdHandle(STD_INPUT_HANDLE - new_fd, handle)
+    CloseHandle(previous)
+    return new_fd
+
+
+def sys_dup2(old_fd: int, new_fd: int) -> int:
+    /*
+    * Come dup2 di Linux, ma new_fd puo' essere solo 0, 1 o 2 (vedi
+    * win_dup_std): i processi figli (system) scrivono dove punta ora new_fd.
+    * Con old_fd uguale a new_fd controlla solo che old_fd sia aperto.
+    * argomenti:
+    *   old_fd: il file descriptor da duplicare
+    *   new_fd: 0, 1 o 2
+    * return: new_fd, -errno in caso di errore
+    */
+    if old_fd == new_fd:
+        flags = 0
+        if GetHandleInformation(win_handle(old_fd), &flags) == 0:
+            return WIN_EBADF
+        return new_fd
+
+    return win_dup_std(old_fd, new_fd, 1)
+
+
+def sys_dup3(old_fd: int, new_fd: int, flag: int) -> int:
+    /*
+    * Come sys_dup2, ma con O_CLOEXEC il nuovo fd non passa ai processi
+    * figli; old_fd e new_fd devono essere diversi.
+    * argomenti:
+    *   old_fd: il file descriptor da duplicare
+    *   new_fd: 0, 1 o 2
+    *   flag: 0 o O_CLOEXEC
+    * return: new_fd, -errno in caso di errore
+    */
+    if old_fd == new_fd:
+        return WIN_EINVAL
+
+    inherit = 1
+    if (flag & O_CLOEXEC) != 0:
+        inherit = 0
+
+    return win_dup_std(old_fd, new_fd, inherit)

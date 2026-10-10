@@ -1,0 +1,111 @@
+
+#include <libstd/stdio>
+#include <libstd/process>
+#include <libstd/mem>
+#include <libstd/time>
+
+
+#ifdef __unix__
+#include <libstd/wrapper/linux/sysfile>
+#else
+#include <libstd/wrapper/windows/sysfile>
+#endif
+
+
+def get_size_file(fd: int) -> long:
+    /*
+    * Restituisce la dimensione di un file aperto. Su un errore di fstat
+    * stampa un messaggio e termina il programma.
+    * argomenti:
+    *   fd: il file descriptor
+    * return: la dimensione in byte
+    */
+    file_stat = new Stat()
+    response = sys_fstat(fd, file_stat)
+    if response < 0:
+        print("errore nel tentativo di usare la fstat; errcode: " + itoa(response))
+        exit(1)
+    return file_stat.st_size
+
+
+def readfile(path: str) -> str:
+    /*
+    * Legge tutto il contenuto di un file. Se il file non si apre o non si
+    * legge stampa un messaggio e termina il programma.
+    * argomenti:
+    *   path: il percorso del file
+    * return: il contenuto
+    */
+    fd = open(path, "r")
+
+    if fd < 0:
+        print("Error while trying open the file: " + path + "\n")
+        exit(1)
+
+    size_file = get_size_file(fd) + 1
+    buffer = rt_alloc_up(size_file)
+    response = sys_read(fd, buffer, size_file)
+
+    if response < 0:
+        print("error while trying to read the file: " + path + "\n")
+        exit(1)
+
+    close(fd)
+    rt_str_seal(buffer, response)
+    return buffer
+
+
+def open(path: str, mode: str) -> int:
+    /*
+    * Apre un file con una modalita' in stile C.
+    * argomenti:
+    *   path: il percorso del file
+    *   mode: "r" in lettura, "w" in scrittura (crea il file o lo svuota),
+    *     "a" in scrittura in fondo (crea il file se manca); un altro valore
+    *     vale come "r"
+    * return: il file descriptor, negativo su errore
+    */
+    mode_val = 0
+    if mode == "w":
+        mode_val = O_WRONLY | O_CREAT | O_TRUNC
+    if mode == "r":
+        mode_val = O_RDONLY
+    if mode == "a":
+        mode_val = O_WRONLY | O_CREAT | O_APPEND
+    return sys_open(path, mode_val, CLASSIC)
+
+
+def close(fd: int) -> None:
+    /*
+    * Chiude un file descriptor; con un fd negativo non fa niente.
+    * argomenti:
+    *   fd: il file descriptor
+    * return: nessuno (procedura)
+    */
+    if fd >= 0:
+        sys_close(fd)
+#ifdef __aarch64__
+    asminline(
+        b .out
+    ) endasm
+#else
+    asminline(
+        jmp .out
+    ) endasm
+#endif
+
+
+def get_available_size(fd: int) -> int:
+    /*
+    * Restituisce quanti byte si possono leggere subito da un file descriptor
+    * (FIONREAD). Su una socket sono solo i byte gia' arrivati.
+    * argomenti:
+    *   fd: il file descriptor
+    * return: il numero di byte, negativo se ioctl fallisce
+    */
+    n = 0
+    response = sys_ioctl(fd, FIONREAD, &n)
+    if response < 0:
+        print("errore durante ioctl FIONREAD\n")
+        return response
+    return n

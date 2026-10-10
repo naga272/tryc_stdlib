@@ -1,0 +1,138 @@
+#ifdef __unix__
+#include <libstd/wrapper/linux/systime>
+#else
+#include <libstd/wrapper/windows/systime>
+#endif
+
+
+def now(tp: Timespec) -> None:
+    /*
+    * Scrive in tp l'ora corrente del calendario (CLOCK_REALTIME): secondi e
+    * nanosecondi dall'Epoch Unix. Puo' saltare se l'orologio di sistema
+    * viene regolato.
+    * argomenti:
+    *   tp: dove scrivere l'istante
+    * return: nessuno (procedura)
+    */
+    sys_clock_gettime(CLOCK_REALTIME, tp)
+
+
+def monotonic(tp: Timespec) -> None:
+    /*
+    * Scrive in tp l'istante dell'orologio monotono (CLOCK_MONOTONIC), che
+    * parte da un punto qualsiasi e avanza sempre: serve a misurare durate.
+    * argomenti:
+    *   tp: dove scrivere l'istante
+    * return: nessuno (procedura)
+    */
+    sys_clock_gettime(CLOCK_MONOTONIC, tp)
+
+
+def timestamp() -> long:
+    /*
+    * Restituisce l'ora corrente in secondi dall'Epoch Unix (1 gennaio 1970).
+    * return: i secondi
+    */
+    tp = new Timespec()
+    now(tp)
+    return tp.tv_sec
+
+
+def timestamp_ms() -> long:
+    /*
+    * Restituisce l'ora corrente in millisecondi dall'Epoch Unix.
+    * return: i millisecondi
+    */
+    tp = new Timespec()
+    now(tp)
+    return (tp.tv_sec * 1000) + (tp.tv_nsec / 1000000)
+
+
+def elapsed_ms(start: Timespec, end: Timespec) -> long:
+    /*
+    * Restituisce i millisecondi fra due istanti, di solito letti con
+    * monotonic.
+    * argomenti:
+    *   start: l'istante iniziale
+    *   end: l'istante finale
+    * return: i millisecondi trascorsi
+    */
+    sec_diff = end.tv_sec - start.tv_sec
+    nsec_diff = end.tv_nsec - start.tv_nsec
+    return (sec_diff * 1000) + (nsec_diff / 1000000)
+
+
+def since_ms(start: Timespec) -> long:
+    /*
+    * Restituisce i millisecondi trascorsi da start, letto prima con
+    * monotonic.
+    * argomenti:
+    *   start: l'istante iniziale
+    * return: i millisecondi trascorsi
+    */
+    end = new Timespec()
+    monotonic(end)
+    return elapsed_ms(start, end)
+
+
+def sleep_ms(ms: long) -> None:
+    /*
+    * Sospende il processo per un certo numero di millisecondi. Un segnale
+    * puo' interrompere l'attesa prima.
+    * argomenti:
+    *   ms: la durata in millisecondi
+    * return: nessuno (procedura)
+    */
+    sec = ms / (1000 as long)
+    rem_ms = ms - (sec * (1000 as long))
+
+    request = new Timespec()
+    remain = new Timespec()
+
+    request.tv_sec = sec
+    request.tv_nsec = rem_ms * (1000000 as long)
+
+    sys_clock_nanosleep(CLOCK_MONOTONIC, TIMER_RELATIVE, request, remain)
+
+
+def sleep_seconds(sec: long) -> None:
+    /*
+    * Sospende il processo per un certo numero di secondi.
+    * argomenti:
+    *   sec: la durata in secondi
+    * return: nessuno (procedura)
+    */
+    sleep_ms(sec * 1000 as long)
+
+
+def cpu_time_ms() -> long:
+    /*
+    * Restituisce il tempo di CPU usato finora dal processo, sommando tutti
+    * i suoi thread; l'attesa (sleep, I/O) non conta.
+    * return: i millisecondi di CPU
+    */
+    tp = new Timespec()
+    sys_clock_gettime(CLOCK_PROCESS_CPUTIME_ID, tp)
+    return (tp.tv_sec * 1000) + (tp.tv_nsec / 1000000)
+
+
+def thread_cpu_time_ms() -> long:
+    /*
+    * Restituisce il tempo di CPU usato finora dal thread chiamante.
+    * return: i millisecondi di CPU
+    */
+    tp = new Timespec()
+    sys_clock_gettime(CLOCK_THREAD_CPUTIME_ID, tp)
+    return (tp.tv_sec * 1000) + (tp.tv_nsec / 1000000)
+
+
+def clock_resolution_ns(which_clock: int) -> long:
+    /*
+    * Restituisce la risoluzione di un orologio.
+    * argomenti:
+    *   which_clock: l'orologio, es. CLOCK_MONOTONIC
+    * return: la risoluzione in nanosecondi
+    */
+    tp = new Timespec()
+    sys_clock_getres(which_clock, tp)
+    return (tp.tv_sec * 1000000000) + tp.tv_nsec

@@ -1,0 +1,1686 @@
+
+// type id delle tabelle nell'header (SDICT_TABLE_TYPE_ID,
+// DICT_TABLE_TYPE_ID e IDICT_TABLE_TYPE_ID in runtime/rt.h): liberata una tabella, il
+// runtime rilascia le chiavi e i valori che conteneva
+#define SDICT_TABLE_TYPE_ID -716025276
+#define DICT_TABLE_TYPE_ID -716025275
+#define IDICT_TABLE_TYPE_ID -716025274
+
+#include <libstd/string>
+#ifdef __unix__
+#include <libstd/wrapper/linux/dict>
+#else
+#include <libstd/wrapper/windows/dict>
+#endif
+
+
+/*
+* dict: hash map con chiavi 'str' e valori 'int', capacita' fissa
+* decisa alla creazione (open addressing, linear probing).
+*
+* Layout di un handle 'd' (un unico blocco allocato con rt_alloc_up):
+*
+* +0  capacity   (int, 4 byte) sempre una potenza di 2
+* +4  count      (int, 4 byte)
+* +8  slot[0]
+* +8+24*capacity  slot[i]
+*
+* [capacity][count][slot 0][slot 1][slot ...][slot capacity - 1]
+* 0        4      8       32      56       ...            8+24*(capacity-1)
+*
+*
+*                   ===== Layout slot: =====
+* [                          slot                           ]
+* [key: str][hash: int][value: int][state: int][padding: int]
+* 0        8          12          16         20            24
+*
+* WARN:
+*   - [state]:
+*       - 0 = mai usato
+*       - 1 = occupato
+*       - 2 = tombstone (cancellato)
+*
+* dict_set non fa crescere la tabella: se e' piena restituisce 0.
+* idict_set_grow invece la raddoppia quando serve.
+*/
+
+
+def dict_peek64(addr: str) -> str:
+    /*
+    * Legge 8 byte (un puntatore) all'indirizzo addr.
+    * argomenti:
+    *   addr: l'indirizzo
+    * return: il valore letto, come str
+    */
+#ifdef __aarch64__
+    asminline(
+        ldr x0, [x0]
+    ) endasm
+#else
+    asminline (
+        mov rax, [rdi]
+    ) endasm
+#endif
+
+
+def dict_poke64(addr: str, val: str) -> int:
+    /*
+    * Scrive un puntatore a 8 byte all'indirizzo addr, in memoria che non
+    * conta i riferimenti (una struttura C, una tabella scritta a mano): val
+    * non verra' mai liberato. Per una tabella che conta i riferimenti c'e'
+    * dict_poke64_raw, con rt_rc_retain e rt_rc_release.
+    * argomenti:
+    *   addr: l'indirizzo
+    *   val: il puntatore
+    * return: 0
+    */
+    unsafe:
+        view = addr as ptr long
+        view[0] = val as long
+    return 0
+
+
+def dict_poke64_raw(addr: str, val: str) -> int:
+    /*
+    * Come dict_poke64, ma senza tenere in vita val: i riferimenti li
+    * gestisce chi chiama.
+    * argomenti:
+    *   addr: l'indirizzo
+    *   val: il puntatore
+    * return: 0
+    */
+#ifdef __aarch64__
+    asminline(
+        str x1, [x0]
+        mov x0, 0
+    ) endasm
+#else
+    asminline (
+        mov [rdi], rsi
+        mov rax, 0
+    ) endasm
+#endif
+
+
+def dict_peek32(addr: str) -> int:
+    /*
+    * Legge un intero a 32 bit, con segno, all'indirizzo addr.
+    * argomenti:
+    *   addr: l'indirizzo
+    * return: il valore
+    */
+#ifdef __aarch64__
+    asminline(
+        ldrsw x0, [x0]
+    ) endasm
+#else
+    asminline (
+        movsxd rax, dword [rdi]
+    ) endasm
+#endif
+
+
+def dict_poke32(addr: str, val: int) -> int:
+    /*
+    * Scrive un intero a 32 bit all'indirizzo addr.
+    * argomenti:
+    *   addr: l'indirizzo
+    *   val: il valore
+    * return: 0
+    */
+#ifdef __aarch64__
+    asminline(
+        str w1, [x0]
+        mov x0, 0
+    ) endasm
+#else
+    asminline (
+        mov [rdi], esi
+        mov rax, 0
+    ) endasm
+#endif
+
+
+inline def dict_slot_addr(d: str, idx: int) -> str:
+    /*
+    * Restituisce l'indirizzo dello slot idx di un dict: 24 byte per slot,
+    * dopo un header di 8.
+    * argomenti:
+    *   d: il dict
+    *   idx: lo slot, da 0
+    * return: l'indirizzo
+    */
+    return d + (8 + (idx * 24))
+
+
+def dict_next_pow2(n: int) -> int:
+    /*
+    * Restituisce la piu' piccola potenza di 2 maggiore o uguale a n, almeno 1.
+    * argomenti:
+    *   n: il valore
+    * return: la potenza di 2
+    */
+    p = 1
+    while p < n:
+        p = p * 2
+    return p
+
+
+def dict_new(capacity: int) -> str:
+    /*
+    * Crea un dict (chiavi str, valori int) di capacita' fissa, arrotondata
+    * alla potenza di 2 successiva.
+    * argomenti:
+    *   capacity: il numero minimo di slot
+    * return: il dict
+    */
+    cap = dict_next_pow2(capacity)
+    total_size = 8 + (cap * 24)
+    base = rt_alloc_up(total_size)
+    dict_poke32(base, cap)
+    dict_poke32(base + 4, 0)
+    dict_poke32(base - 8, DICT_TABLE_TYPE_ID)
+    return base
+
+
+def dict_capacity(d: str) -> int:
+    /*
+    * Restituisce il numero di slot di un dict.
+    * argomenti:
+    *   d: il dict
+    * return: la capacita'
+    */
+    return dict_peek32(d)
+
+
+def dict_count(d: str) -> int:
+    /*
+    * Restituisce il numero di chiavi presenti in un dict.
+    * argomenti:
+    *   d: il dict
+    * return: il numero di chiavi
+    */
+    return dict_peek32(d + 4)
+
+
+def dict_set(d: str, key: str, value: int) -> int:
+    /*
+    * Inserisce o aggiorna key -> value; il dict tiene un riferimento alla
+    * chiave.
+    * argomenti:
+    *   d: il dict
+    *   key: la chiave
+    *   value: il valore
+    * return: 1 se riuscito, 0 se la tabella e' piena
+    */
+    h = dict_hash(key)
+    count_before = dict_peek32(d + 4)
+    slot = dict_probe_set(d, key, h)
+    if slot == 0:
+        return 0
+
+    if dict_peek32(d + 4) != count_before:
+        rt_rc_retain(key)
+    dict_poke32(slot + 12, value)
+    return 1
+
+
+def dict_get(d: str, key: str) -> int:
+    /*
+    * Restituisce il valore di una chiave.
+    * argomenti:
+    *   d: il dict
+    *   key: la chiave
+    * return: il valore, -1 se la chiave non c'e' (se -1 e' un valore valido si
+    *   controlla prima dict_has)
+    */
+    h = dict_hash(key)
+    slot = dict_probe_get(d, key, h)
+    if slot == 0:
+        return -1
+    return dict_peek32(slot + 12)
+
+
+def dict_has(d: str, key: str) -> int:
+    /*
+    * Controlla se una chiave e' presente.
+    * argomenti:
+    *   d: il dict
+    *   key: la chiave
+    * return: 1 se c'e', 0 altrimenti
+    */
+    h = dict_hash(key)
+    slot = dict_probe_get(d, key, h)
+    if slot == 0:
+        return 0
+    return 1
+
+
+def dict_del(d: str, key: str) -> int:
+    /*
+    * Toglie una chiave; lo slot resta segnato come cancellato e la
+    * capacita' non cambia.
+    * argomenti:
+    *   d: il dict
+    *   key: la chiave
+    * return: 1 se c'era, 0 altrimenti
+    */
+    h = dict_hash(key)
+    slot = dict_probe_get(d, key, h)
+    if slot == 0:
+        return 0
+
+    old_key = dict_peek64(slot)
+    dict_poke64_raw(slot, 0 as str)
+    dict_poke32(slot + 16, 2)
+    dict_poke32(d + 4, dict_count(d) - 1)
+    rt_rc_release(old_key)
+    return 1
+
+
+/*
+* sdict_*: stessa identica hash map di dict_*,
+* ma con valori 'str' invece di 'int'.
+* Mappa stringhe su altre stringhe
+* (es. configurazioni, header HTTP, variabili d'ambiente).
+*
+* Layout di un handle 'd':
+*
+* +0  capacity (int, 4 byte)
+* +4  count    (int, 4 byte)
+* +8  slot[i]  = [ key: str (8) | value: str (8) |
+*                  hash: int (4) | state: int (4) ]
+*/
+
+
+def idict_grow(d: str) -> str:
+    /*
+    * Raddoppia la capacita' di un dict (chiavi str, valori int), copiando
+    * le chiavi presenti in una tabella nuova.
+    * argomenti:
+    *   d: il dict
+    * return: la tabella nuova
+    */
+    old_cap = dict_capacity(d)
+    new_cap = old_cap * 2
+
+    if new_cap == 0:
+        new_cap = 8
+
+    new_d = dict_new(new_cap)
+    for i = 0; i < old_cap; i++:
+        slot = dict_slot_addr(d, i)
+        state = dict_peek32(slot + 16)
+        if state != 1:
+            continue
+
+        key = dict_peek64(slot)
+        value = dict_peek32(slot + 12)
+        dict_set(new_d, key, value)
+
+    return new_d
+
+
+def idict_set_grow(d: str, key: str, value: int) -> str:
+    /*
+    * Come dict_set, ma fa crescere la tabella prima che si riempia oltre la
+    * meta'. Vale anche per un dict creato da un letterale.
+    * argomenti:
+    *   d: il dict
+    *   key: la chiave
+    *   value: il valore
+    * return: il dict da usare d'ora in poi: se e' cresciuto e' un altro,
+    *   quindi si riassegna (d = idict_set_grow(d, k, v))
+    */
+    if (dict_count(d) + 1) * 2 > dict_capacity(d):
+        d = idict_grow(d)
+
+    ok = dict_set(d, key, value)
+    if ok:
+        return d
+
+    grown = idict_grow(d)
+    dict_set(grown, key, value)
+    return grown
+
+
+inline def sdict_slot_addr(d: str, idx: int) -> str:
+    /*
+    * Restituisce l'indirizzo dello slot idx di un sdict: 24 byte per slot,
+    * dopo un header di 8.
+    * argomenti:
+    *   d: il sdict
+    *   idx: lo slot, da 0
+    * return: l'indirizzo
+    */
+    return d + (8 + (idx * 24))
+
+
+def sdict_new(capacity: int) -> str:
+    /*
+    * Crea un sdict (chiavi str, valori str) di capacita' fissa, arrotondata
+    * alla potenza di 2 successiva.
+    * argomenti:
+    *   capacity: il numero minimo di slot
+    * return: il sdict
+    */
+    capacity = dict_next_pow2(capacity)
+    total_size = 8 + (capacity * 24)
+    base = rt_alloc_up(total_size)
+    dict_poke32(base, capacity)
+    dict_poke32(base + 4, 0)
+    dict_poke32(base - 8, SDICT_TABLE_TYPE_ID)
+    return base
+
+
+def sdict_capacity(d: str) -> int:
+    /*
+    * Restituisce il numero di slot di un sdict.
+    * argomenti:
+    *   d: il sdict
+    * return: la capacita'
+    */
+    return dict_peek32(d)
+
+
+def sdict_count(d: str) -> int:
+    /*
+    * Restituisce il numero di chiavi presenti in un sdict.
+    * argomenti:
+    *   d: il sdict
+    * return: il numero di chiavi
+    */
+    return dict_peek32(d + 4)
+
+
+def sdict_set(d: str, key: str, value: str) -> int:
+    /*
+    * Inserisce o aggiorna key -> value; la tabella tiene un riferimento a
+    * chiave e valore.
+    * argomenti:
+    *   d: il sdict
+    *   key: la chiave
+    *   value: il valore
+    * return: 1 se riuscito, 0 se la tabella e' piena
+    */
+    h = dict_hash(key)
+    count_before = dict_peek32(d + 4)
+    slot = sdict_probe_set(d, key, h)
+    if slot == 0:
+        return 0
+
+    if dict_peek32(d + 4) != count_before:
+        rt_rc_retain(key)
+
+    old = dict_peek64(slot + 8)
+    rt_rc_retain(value)
+    dict_poke64_raw(slot + 8, value)
+    rt_rc_release(old)
+    return 1
+
+
+def sdict_set_ref(d: str, key: str, value: ref) -> int:
+    /*
+    * Come sdict_set, con un oggetto come valore (si rilegge con 'as tipo').
+    * argomenti:
+    *   d: il sdict
+    *   key: la chiave
+    *   value: l'oggetto
+    * return: 1 se riuscito, 0 se la tabella e' piena
+    */
+    return sdict_set(d, key, value as str)
+
+
+def sdict_set_grow_ref(d: str, key: str, value: ref) -> str:
+    /*
+    * Come sdict_set_grow, con un oggetto come valore.
+    * argomenti:
+    *   d: il sdict
+    *   key: la chiave
+    *   value: l'oggetto
+    * return: il sdict da usare d'ora in poi
+    */
+    return sdict_set_grow(d, key, value as str)
+
+
+def sdict_get(d: str, key: str) -> str:
+    /*
+    * Restituisce il valore di una chiave.
+    * argomenti:
+    *   d: il sdict
+    *   key: la chiave
+    * return: il valore, "" se la chiave non c'e' (se "" e' un valore valido si
+    *   controlla prima sdict_has)
+    */
+    slot = sdict_find(d, key)
+    if slot == 0:
+        return ""
+
+    return dict_peek64(slot + 8)
+
+
+def sdict_has(d: str, key: str) -> int:
+    /*
+    * Controlla se una chiave e' presente.
+    * argomenti:
+    *   d: il sdict
+    *   key: la chiave
+    * return: 1 se c'e', 0 altrimenti
+    */
+    if sdict_find(d, key) == 0:
+        return 0
+    return 1
+
+
+def sdict_del(d: str, key: str) -> int:
+    /*
+    * Toglie una chiave e rilascia chiave e valore.
+    * argomenti:
+    *   d: il sdict
+    *   key: la chiave
+    * return: 1 se c'era, 0 altrimenti
+    */
+    h = dict_hash(key)
+    slot = sdict_probe_get(d, key, h)
+    if slot == 0:
+        return 0
+
+    old_key = dict_peek64(slot)
+    old_value = dict_peek64(slot + 8)
+    dict_poke64_raw(slot, 0 as str)
+    dict_poke64_raw(slot + 8, 0 as str)
+    dict_poke32(slot + 20, 2)
+    dict_poke32(d + 4, sdict_count(d) - 1)
+    rt_rc_release(old_key)
+    rt_rc_release(old_value)
+    return 1
+
+
+/*
+* sdict_grow, sdict_set_grow e sdict_iter: un sdict che cresce da solo e
+* che si puo' scorrere, quando il numero di chiavi non e' noto prima.
+*/
+
+
+def sdict_grow(d: str) -> str:
+    /*
+    * Raddoppia la capacita' di un sdict, copiando le chiavi presenti in una
+    * tabella nuova.
+    * argomenti:
+    *   d: il sdict
+    * return: la tabella nuova
+    */
+    old_cap = sdict_capacity(d)
+    new_cap = old_cap * 2
+
+    if new_cap == 0:
+        new_cap = 8
+
+    new_d = sdict_new(new_cap)
+    for i = 0; i < old_cap; i++:
+        slot = sdict_slot_addr(d, i)
+        state = dict_peek32(slot + 20)
+        if state != 1:
+            continue
+
+        key = dict_peek64(slot)
+        value = dict_peek64(slot + 8)
+        sdict_set(new_d, key, value)
+
+    return new_d
+
+
+def sdict_set_grow(d: str, key: str, value: str) -> str:
+    /*
+    * Come sdict_set, ma fa crescere la tabella prima che si riempia oltre la
+    * meta'.
+    * argomenti:
+    *   d: il sdict
+    *   key: la chiave
+    *   value: il valore
+    * return: il sdict da usare d'ora in poi: se e' cresciuto e' un altro,
+    *   quindi si riassegna (d = sdict_set_grow(d, k, v))
+    */
+    if (sdict_count(d) + 1) * 2 > sdict_capacity(d):
+        d = sdict_grow(d)
+
+    ok = sdict_set(d, key, value)
+    if ok:
+        return d
+
+    grown = sdict_grow(d)
+    sdict_set(grown, key, value)
+    return grown
+
+
+def sdict_iter(d: str) -> (str[], str[]):
+    /*
+    * Restituisce le chiavi e i valori di un sdict in due array paralleli,
+    * nell'ordine degli slot.
+    * argomenti:
+    *   d: il sdict
+    * return: (chiavi, valori), due str[] di sdict_count(d) elementi
+    */
+    count = sdict_count(d)
+    cap = sdict_capacity(d)
+
+    keys = new str[count]
+    values = new str[count]
+
+    out_i = 0
+    for i = 0; i < cap; i++:
+        slot = sdict_slot_addr(d, i)
+        if dict_peek32(slot + 20) != 1:
+            continue
+        keys[out_i] = dict_peek64(slot)
+        values[out_i] = dict_peek64(slot + 8)
+        out_i++
+
+    return keys, values
+
+
+class DictIterator:
+    d str
+    idx int
+    cap int
+
+
+def dict_iter_set(it: DictIterator, d: str) -> None:
+    /*
+    * Riporta un iteratore all'inizio di un sdict, senza allocare.
+    * argomenti:
+    *   it: l'iteratore
+    *   d: il sdict
+    * return: nessuno (procedura)
+    */
+    it.d = d
+    it.idx = 0
+    it.cap = sdict_capacity(d)
+    return
+
+
+def dict_iter_new(d: str) -> DictIterator:
+    /*
+    * Crea un iteratore all'inizio di un sdict, da usare con dict_iter_has_next
+    * e dict_iter_next.
+    * argomenti:
+    *   d: il sdict
+    * return: l'iteratore
+    */
+    it = new DictIterator()
+    dict_iter_set(it, d)
+    return it
+
+
+def dict_iter_set_end(it: DictIterator, d: str) -> None:
+    /*
+    * Porta un iteratore alla fine di un sdict, per scorrerlo all'indietro con
+    * dict_iter_has_previous e dict_iter_previous.
+    * argomenti:
+    *   it: l'iteratore
+    *   d: il sdict
+    * return: nessuno (procedura)
+    */
+    it.d = d
+    it.cap = sdict_capacity(d)
+    it.idx = it.cap - 1
+    return
+
+
+def dict_iter_has_previous(it: DictIterator) -> int:
+    /*
+    * Controlla se, andando all'indietro, c'e' un'altra coppia; salta gli
+    * slot vuoti. Va chiamata prima di ogni dict_iter_previous.
+    * argomenti:
+    *   it: l'iteratore
+    * return: 1 se c'e', 0 alla fine
+    */
+    while it.idx >= 0:
+        slot = sdict_slot_addr(it.d, it.idx)
+        if dict_peek32(slot + 20) == 1:
+            return 1
+
+        it.idx--
+    return 0
+
+
+def dict_iter_previous(it: DictIterator) -> (str, str):
+    /*
+    * Restituisce la coppia corrente e sposta l'iteratore indietro. Va
+    * chiamata dopo un dict_iter_has_previous che ha dato 1.
+    * argomenti:
+    *   it: l'iteratore
+    * return: (chiave, valore)
+    */
+    slot = sdict_slot_addr(it.d, it.idx)
+    k = dict_peek64(slot)
+    v = dict_peek64(slot + 8)
+    it.idx--
+    return k, v
+
+
+def dict_iter_has_next(it: DictIterator) -> int:
+    /*
+    * Controlla se c'e' un'altra coppia; salta gli slot vuoti. Va chiamata
+    * prima di ogni dict_iter_next.
+    * argomenti:
+    *   it: l'iteratore
+    * return: 1 se c'e', 0 alla fine
+    */
+    while it.idx < it.cap:
+        slot = sdict_slot_addr(it.d, it.idx)
+        if dict_peek32(slot + 20) == 1:
+            return 1
+        it.idx++
+    return 0
+
+
+def dict_iter_next(it: DictIterator) -> (str, str):
+    /*
+    * Restituisce la coppia corrente e sposta l'iteratore avanti. Va chiamata
+    * dopo un dict_iter_has_next che ha dato 1.
+    * argomenti:
+    *   it: l'iteratore
+    * return: (chiave, valore)
+    */
+    slot = sdict_slot_addr(it.d, it.idx)
+    k = dict_peek64(slot)
+    v = dict_peek64(slot + 8)
+    it.idx++
+    return k, v
+
+
+def dict_iter_del_current(it: DictIterator) -> None:
+    /*
+    * Toglie dal sdict la coppia restituita dall'ultimo dict_iter_next.
+    * argomenti:
+    *   it: l'iteratore
+    * return: nessuno (procedura)
+    */
+    prev_slot = sdict_slot_addr(it.d, it.idx - 1)
+    key = dict_peek64(prev_slot)
+    sdict_del(it.d, key)
+    return
+
+
+/*
+* vdict_*: come dict_* e sdict_*, ma il valore puo' essere 'int',
+* 'long' o 'str' indistintamente. Il tipo effettivo e' tracciato con
+* un tag a runtime, non e' un vero generico.
+* vdict_get_* controlla il tag prima di restituire il valore:
+* se non corrisponde al tipo richiesto,
+* si comporta come "non trovato" invece di reinterpretare byte a caso.
+*
+* Layout di un handle 'd':
+* +0  capacity (int, 4 byte)
+* +4  count    (int, 4 byte)
+* +8  slot[i]  = [ key: str (8) | value: 8 byte grezzi | type_tag: int (4) | state: int (4) ]
+*
+* type_tag (valido solo se state == 1):
+* 0 = nessuno, 1 = int, 2 = long, 3 = str
+*
+* Limite noto: valori che occupano piu' di 8 byte
+* (es. una class per valore) non ci stanno in questo schema
+*/
+
+
+def vdict_int_to_carrier(x: int) -> str:
+    /*
+    * Converte un int nel valore a 8 byte che un vdict tiene negli slot.
+    * argomenti:
+    *   x: l'intero
+    * return: il valore a 8 byte
+    */
+#ifdef __aarch64__
+    asminline(
+        sxtw x0, w0
+    ) endasm
+#else
+    asminline (
+        movsxd rax, edi
+    ) endasm
+#endif
+
+
+def vdict_carrier_to_int(carrier: str) -> int:
+    /*
+    * Ricava l'int da un valore a 8 byte di un vdict, al contrario di
+    * vdict_int_to_carrier.
+    * argomenti:
+    *   carrier: il valore a 8 byte
+    * return: l'intero
+    */
+#ifdef __aarch64__
+    asminline(
+        mov w0, w0
+    ) endasm
+#else
+    asminline (
+        mov eax, edi
+    ) endasm
+#endif
+
+
+inline def vdict_int_as_long(x: long) -> long:
+    /*
+    * Restituisce x come long: chiamata con un int, per esempio
+    * vdict_int_as_long(-1), lo allarga a long, cosa che un return non fa.
+    * argomenti:
+    *   x: il valore
+    * return: x
+    */
+    return x
+
+
+inline def vdict_slot_addr(d: str, idx: int) -> str:
+    /*
+    * Restituisce l'indirizzo dello slot idx di un vdict: 24 byte per slot,
+    * dopo un header di 8.
+    * argomenti:
+    *   d: il vdict
+    *   idx: lo slot, da 0
+    * return: l'indirizzo
+    */
+    return d + (8 + (idx * 24))
+
+
+def vdict_new(capacity: int) -> str:
+    /*
+    * Crea un vdict (chiavi str, valori int, long o str) di capacita' fissa.
+    * argomenti:
+    *   capacity: il numero di slot
+    * return: il vdict
+    */
+    total_size = 8 + (capacity * 24)
+    base = rt_alloc_up(total_size)
+    dict_poke32(base, capacity)
+    dict_poke32(base + 4, 0)
+    return base
+
+
+def vdict_capacity(d: str) -> int:
+    /*
+    * Restituisce il numero di slot di un vdict.
+    * argomenti:
+    *   d: il vdict
+    * return: la capacita'
+    */
+    return dict_peek32(d)
+
+
+def vdict_count(d: str) -> int:
+    /*
+    * Restituisce il numero di chiavi presenti in un vdict.
+    * argomenti:
+    *   d: il vdict
+    * return: il numero di chiavi
+    */
+    return dict_peek32(d + 4)
+
+
+def vdict_set_raw(d: str, key: str, value: str, tag: int) -> int:
+    /*
+    * Inserisce o aggiorna una chiave con un valore a 8 byte e il suo tipo;
+    * la usano vdict_set_int, vdict_set_long e vdict_set_str.
+    * argomenti:
+    *   d: il vdict
+    *   key: la chiave
+    *   value: il valore a 8 byte
+    *   tag: il tipo: 1 int, 2 long, 3 str
+    * return: 1 se riuscito, 0 se la tabella e' piena
+    */
+    capacity = vdict_capacity(d)
+    h = dict_hash(key)
+    q = h / capacity
+    idx = h - (q * capacity)
+    i = 0
+    free_slot = -1
+
+    while i < capacity:
+        slot = vdict_slot_addr(d, idx)
+        state = dict_peek32(slot + 20)
+
+        if state == 0:
+            break
+
+        if state == 2:
+            if free_slot == -1:
+                free_slot = idx
+
+        if state == 1:
+            existing_key = dict_peek64(slot)
+            if existing_key == key:
+                dict_poke64(slot + 8, value)
+                dict_poke32(slot + 16, tag)
+                return 1
+
+        idx = idx + 1
+        if idx == capacity:
+            idx = 0
+        i++
+
+    if free_slot == -1:
+        if i == capacity:
+            return 0
+        free_slot = idx
+
+    target = vdict_slot_addr(d, free_slot)
+    dict_poke64(target, key)
+    dict_poke64(target + 8, value)
+    dict_poke32(target + 16, tag)
+    dict_poke32(target + 20, 1)
+    dict_poke32(d + 4, vdict_count(d) + 1)
+    return 1
+
+
+def vdict_set_int(d: str, key: str, value: int) -> int:
+    /*
+    * Inserisce o aggiorna una chiave con un valore int.
+    * argomenti:
+    *   d: il vdict
+    *   key: la chiave
+    *   value: il valore
+    * return: 1 se riuscito, 0 se la tabella e' piena
+    */
+    return vdict_set_raw(d, key, vdict_int_to_carrier(value), 1)
+
+
+def vdict_set_long(d: str, key: str, value: long) -> int:
+    /*
+    * Inserisce o aggiorna una chiave con un valore long.
+    * argomenti:
+    *   d: il vdict
+    *   key: la chiave
+    *   value: il valore
+    * return: 1 se riuscito, 0 se la tabella e' piena
+    */
+    unsafe:
+        return vdict_set_raw(d, key, value as str, 2)
+
+
+def vdict_set_str(d: str, key: str, value: str) -> int:
+    /*
+    * Inserisce o aggiorna una chiave con un valore str.
+    * argomenti:
+    *   d: il vdict
+    *   key: la chiave
+    *   value: il valore
+    * return: 1 se riuscito, 0 se la tabella e' piena
+    */
+    return vdict_set_raw(d, key, value, 3)
+
+
+def vdict_type_of(d: str, key: str) -> int:
+    /*
+    * Restituisce il tipo del valore di una chiave.
+    * argomenti:
+    *   d: il vdict
+    *   key: la chiave
+    * return: 1 (int), 2 (long) o 3 (str), 0 se la chiave non c'e'
+    */
+    capacity = vdict_capacity(d)
+    h = dict_hash(key)
+    q = h / capacity
+    idx = h - (q * capacity)
+    i = 0
+    while i < capacity:
+        slot = vdict_slot_addr(d, idx)
+        state = dict_peek32(slot + 20)
+
+        if state == 0:
+            return 0
+
+        if state == 1:
+            existing_key = dict_peek64(slot)
+            if existing_key == key:
+                return dict_peek32(slot + 16)
+
+        idx = idx + 1
+        if idx == capacity:
+            idx = 0
+        i++
+    return 0
+
+
+def vdict_has(d: str, key: str) -> int:
+    /*
+    * Controlla se una chiave e' presente, qualunque sia il tipo del valore.
+    * argomenti:
+    *   d: il vdict
+    *   key: la chiave
+    * return: 1 se c'e', 0 altrimenti
+    */
+    tag = vdict_type_of(d, key)
+    if tag == 0:
+        return 0
+    return 1
+
+
+def vdict_get_int(d: str, key: str) -> int:
+    /*
+    * Restituisce il valore int di una chiave.
+    * argomenti:
+    *   d: il vdict
+    *   key: la chiave
+    * return: il valore, -1 se la chiave non c'e' o il valore non e' un int
+    */
+    capacity = vdict_capacity(d)
+    h = dict_hash(key)
+    q = h / capacity
+    idx = h - (q * capacity)
+    i = 0
+    while i < capacity:
+        slot = vdict_slot_addr(d, idx)
+        state = dict_peek32(slot + 20)
+
+        if state == 0:
+            return -1
+
+        if state == 1:
+            existing_key = dict_peek64(slot)
+            if existing_key == key:
+                tag = dict_peek32(slot + 16)
+                if tag != 1:
+                    return -1
+                carrier = dict_peek64(slot + 8)
+                return vdict_carrier_to_int(carrier)
+
+        idx = idx + 1
+        if idx == capacity:
+            idx = 0
+        i++
+    return -1
+
+
+def vdict_get_long(d: str, key: str) -> long:
+    /*
+    * Restituisce il valore long di una chiave.
+    * argomenti:
+    *   d: il vdict
+    *   key: la chiave
+    * return: il valore, -1 se la chiave non c'e' o il valore non e' un long
+    */
+    capacity = vdict_capacity(d)
+    h = dict_hash(key)
+    q = h / capacity
+    idx = h - (q * capacity)
+    i = 0
+    while i < capacity:
+        slot = vdict_slot_addr(d, idx)
+        state = dict_peek32(slot + 20)
+
+        if state == 0:
+            return vdict_int_as_long(-1)
+
+        if state == 1:
+            existing_key = dict_peek64(slot)
+            if existing_key == key:
+                tag = dict_peek32(slot + 16)
+                if tag != 2:
+                    return vdict_int_as_long(-1)
+                carrier = dict_peek64(slot + 8)
+                unsafe:
+                    return carrier as long
+
+        idx = idx + 1
+        if idx == capacity:
+            idx = 0
+        i++
+    return vdict_int_as_long(-1)
+
+
+def vdict_get_str(d: str, key: str) -> str:
+    /*
+    * Restituisce il valore str di una chiave.
+    * argomenti:
+    *   d: il vdict
+    *   key: la chiave
+    * return: il valore, "" se la chiave non c'e' o il valore non e' una str
+    */
+    capacity = vdict_capacity(d)
+    h = dict_hash(key)
+    q = h / capacity
+    idx = h - (q * capacity)
+    i = 0
+    while i < capacity:
+        slot = vdict_slot_addr(d, idx)
+        state = dict_peek32(slot + 20)
+
+        if state == 0:
+            return ""
+
+        if state == 1:
+            existing_key = dict_peek64(slot)
+            if existing_key == key:
+                tag = dict_peek32(slot + 16)
+                if tag != 3:
+                    return ""
+                return dict_peek64(slot + 8)
+
+        idx = idx + 1
+        if idx == capacity:
+            idx = 0
+        i++
+    return ""
+
+
+def vdict_del(d: str, key: str) -> int:
+    /*
+    * Toglie una chiave.
+    * argomenti:
+    *   d: il vdict
+    *   key: la chiave
+    * return: 1 se c'era, 0 altrimenti
+    */
+    capacity = vdict_capacity(d)
+    h = dict_hash(key)
+    q = h / capacity
+    idx = h - (q * capacity)
+    i = 0
+    while i < capacity:
+        slot = vdict_slot_addr(d, idx)
+        state = dict_peek32(slot + 20)
+
+        if state == 0:
+            return 0
+
+        if state == 1:
+            existing_key = dict_peek64(slot)
+            if existing_key == key:
+                dict_poke32(slot + 20, 2)
+                dict_poke32(d + 4, vdict_count(d) - 1)
+                return 1
+
+        idx = idx + 1
+        if idx == capacity:
+            idx = 0
+        i++
+    return 0
+
+
+/*
+* adict_*: dict "aperto"
+* (chiave str, valore di qualunque tipo, anche annidato)
+*
+* L'idea: invece di far portare al dict il tag di tipo
+* (come fa vdict_*), lo fa portare al valore stesso.
+* Ogni valore diventa un piccolo blocco allocato ("box")
+* con un type_id come primo campo.
+* adict_set/adict_get maneggiano solo l'indirizzo del box, senza mai
+* sapere cosa contiene: sono infatti solo alias di sdict_set/sdict_get
+* (un box e' comunque solo un puntatore da 8 byte, come qualunque
+* valore str). Questo e' anche il motivo per cui un dict puo'
+* contenere un altro dict: un handle di dict e' anch'esso solo un
+* puntatore da 8 byte, quindi si boxa esattamente come qualunque
+* altro valore, a qualunque livello di annidamento.
+*
+* Layout di un box: [ type_id: int (4 byte) | payload: 8 byte ]
+*
+* type_id:
+* 1 = int, 2 = long, 3 = str, 4 = dict (adict stesso)
+*
+* adict_get restituisce "" per una chiave assente: si controlla prima
+* adict_has.
+*/
+
+
+def adict_new(capacity: int) -> str:
+    /*
+    * Crea un adict (chiavi str, valori box di qualunque tipo, anche altri
+    * dict) di capacita' fissa, arrotondata alla potenza di 2 successiva.
+    * argomenti:
+    *   capacity: il numero minimo di slot
+    * return: l'adict
+    */
+    capacity = dict_next_pow2(capacity)
+    total_size = 8 + (capacity * 24)
+    base = rt_alloc_up(total_size)
+    dict_poke32(base, capacity)
+    dict_poke32(base + 4, 0)
+    dict_poke32(base - 8, SDICT_TABLE_TYPE_ID)
+    return base
+
+
+def adict_set(d: str, key: str, boxed_value: str) -> int:
+    /*
+    * Inserisce o aggiorna una chiave con un box (box_int, box_str...).
+    * argomenti:
+    *   d: l'adict
+    *   key: la chiave
+    *   boxed_value: il box
+    * return: 1 se riuscito, 0 se la tabella e' piena
+    */
+    return sdict_set(d, key, boxed_value)
+
+
+def adict_get(d: str, key: str) -> str:
+    /*
+    * Restituisce il box di una chiave.
+    * argomenti:
+    *   d: l'adict
+    *   key: la chiave
+    * return: il box, "" se la chiave non c'e' (si controlla prima adict_has)
+    */
+    return sdict_get(d, key)
+
+
+def adict_has(d: str, key: str) -> int:
+    /*
+    * Controlla se una chiave e' presente.
+    * argomenti:
+    *   d: l'adict
+    *   key: la chiave
+    * return: 1 se c'e', 0 altrimenti
+    */
+    return sdict_has(d, key)
+
+
+def adict_del(d: str, key: str) -> int:
+    /*
+    * Toglie una chiave.
+    * argomenti:
+    *   d: l'adict
+    *   key: la chiave
+    * return: 1 se c'era, 0 altrimenti
+    */
+    return sdict_del(d, key)
+
+
+def adict_count(d: str) -> int:
+    /*
+    * Restituisce il numero di chiavi presenti in un adict.
+    * argomenti:
+    *   d: l'adict
+    * return: il numero di chiavi
+    */
+    return sdict_count(d)
+
+
+def adict_type_id(boxed: str) -> int:
+    /*
+    * Restituisce il tipo di un box, per scegliere quale unbox_* chiamare.
+    * argomenti:
+    *   boxed: il box, da adict_get o da una box_*
+    * return: 1 int, 2 long, 3 str, 4 dict; -1 per "" (chiave assente)
+    */
+    if boxed == "":
+        return -1
+    return dict_peek32(boxed)
+
+
+def box_int(x: int) -> str:
+    /*
+    * Crea un box con un int, da mettere in un adict.
+    * argomenti:
+    *   x: il valore
+    * return: il box
+    */
+    b = rt_alloc_up(12)
+    dict_poke32(b, 1)
+    dict_poke32(b + 4, x)
+    return b
+
+
+def unbox_int(b: str) -> int:
+    /*
+    * Restituisce l'int di un box creato con box_int; il tipo non viene
+    * controllato (si guarda prima adict_type_id).
+    * argomenti:
+    *   b: il box
+    * return: il valore
+    */
+    return dict_peek32(b + 4)
+
+
+def box_long(x: long) -> str:
+    /*
+    * Crea un box con un long, da mettere in un adict.
+    * argomenti:
+    *   x: il valore
+    * return: il box
+    */
+    b = rt_alloc_up(12)
+    dict_poke32(b, 2)
+    unsafe:
+        dict_poke64(b + 4, x as str)
+    return b
+
+
+def unbox_long(b: str) -> long:
+    /*
+    * Restituisce il long di un box creato con box_long; il tipo non viene
+    * controllato.
+    * argomenti:
+    *   b: il box
+    * return: il valore
+    */
+    unsafe:
+        return dict_peek64(b + 4) as long
+
+
+def box_str(s: str) -> str:
+    /*
+    * Crea un box con una str, da mettere in un adict. Il box tiene
+    * l'indirizzo della stringa, non una copia.
+    * argomenti:
+    *   s: la stringa
+    * return: il box
+    */
+    b = rt_alloc_up(12)
+    dict_poke32(b, 3)
+    dict_poke64(b + 4, s)
+    return b
+
+
+def unbox_str(b: str) -> str:
+    /*
+    * Restituisce la str di un box creato con box_str; il tipo non viene
+    * controllato.
+    * argomenti:
+    *   b: il box
+    * return: la stringa
+    */
+    return dict_peek64(b + 4)
+
+
+def box_dict(d: str) -> str:
+    /*
+    * Crea un box con un altro dict (dict, sdict, vdict o adict), per
+    * annidarli.
+    * argomenti:
+    *   d: il dict
+    * return: il box
+    */
+    b = rt_alloc_up(12)
+    dict_poke32(b, 4)
+    dict_poke64(b + 4, d)
+    return b
+
+
+def unbox_dict(b: str) -> str:
+    /*
+    * Restituisce il dict di un box creato con box_dict; il tipo non viene
+    * controllato.
+    * argomenti:
+    *   b: il box
+    * return: il dict
+    */
+    return dict_peek64(b + 4)
+
+
+def sdict_next_slot(d: str, idx: int) -> int:
+    /*
+    * Restituisce il primo slot occupato da idx in poi, per scorrere un sdict
+    * senza iteratore, anche in cicli annidati sullo stesso sdict:
+    *     i = sdict_next_slot(d, 0)
+    *     while i >= 0:
+    *         k = sdict_key_at(d, i)
+    *         i = sdict_next_slot(d, i + 1)
+    * argomenti:
+    *   d: il sdict
+    *   idx: lo slot da cui cercare
+    * return: lo slot, -1 se non ce ne sono altri
+    */
+    cap = sdict_capacity(d)
+    i = idx
+    while i < cap:
+        if dict_peek32(sdict_slot_addr(d, i) + 20) == 1:
+            return i
+        i++
+    return -1
+
+
+def sdict_key_at(d: str, idx: int) -> str:
+    /*
+    * Restituisce la chiave di uno slot occupato (vedi sdict_next_slot).
+    * argomenti:
+    *   d: il sdict
+    *   idx: lo slot
+    * return: la chiave
+    */
+    return dict_peek64(sdict_slot_addr(d, idx))
+
+
+def sdict_value_at(d: str, idx: int) -> str:
+    /*
+    * Restituisce il valore di uno slot occupato (vedi sdict_next_slot).
+    * argomenti:
+    *   d: il sdict
+    *   idx: lo slot
+    * return: il valore
+    */
+    return dict_peek64(sdict_slot_addr(d, idx) + 8)
+
+
+/*
+* Sdict: un sdict dentro un oggetto. La tabella e' quella di sdict_new
+* (le funzioni sdict_* valgono anche su 'd.table'), ma quando cresce
+* cambia solo il campo: chi tiene l'oggetto non riassegna niente. I
+* metodi non occupano spazio nell'oggetto: 'd.set(k, v)' e' la chiamata
+* diretta Sdict_set(d, k, v). La tabella la crea Sdict_new.
+*
+* Iterazione: d.reset(), poi 'while d.next():' con d.key()/d.value()
+* (o i campi iter_key/iter_value). Il cursore e' uno per oggetto: due
+* cicli annidati sullo stesso dict, o una funzione chiamata nel ciclo
+* che lo riscorre, si spostano il cursore a vicenda; li' si usa
+* sdict_next_slot su d.table. Cancellare la entry corrente va bene; un
+* inserimento che fa crescere la tabella la cambia sotto il cursore.
+*/
+class Sdict:
+    table str
+    iter_idx int
+    iter_key str
+    iter_value str
+    set &Sdict_set
+    get &Sdict_get
+    has &Sdict_has
+    remove &Sdict_remove
+    count &Sdict_count
+    reset &Sdict_reset
+    next &Sdict_next
+    key &Sdict_key
+    value &Sdict_value
+
+
+def Sdict_new(capacity: int) -> Sdict:
+    /*
+    * Crea uno Sdict con una tabella di capacity slot, che poi cresce da sola.
+    * argomenti:
+    *   capacity: la capacita' iniziale
+    * return: lo Sdict
+    */
+    d = new Sdict()
+    d.table = sdict_new(capacity)
+    d.iter_idx = 0
+    return d
+
+
+def Sdict_set(self: Sdict, key: str, value: str) -> None:
+    /*
+    * Inserisce o aggiorna key -> value, facendo crescere la tabella quando
+    * serve.
+    * argomenti:
+    *   key: la chiave
+    *   value: il valore
+    * return: nessuno (procedura)
+    */
+    t = self.table
+    if (sdict_count(t) + 1) * 2 > sdict_capacity(t):
+        t = sdict_grow(t)
+        self.table = t
+    if not sdict_set(t, key, value):
+        t = sdict_grow(t)
+        self.table = t
+        sdict_set(t, key, value)
+    return
+
+
+def Sdict_get(self: Sdict, key: str) -> str:
+    /*
+    * Restituisce il valore di una chiave.
+    * argomenti:
+    *   key: la chiave
+    * return: il valore, "" se la chiave non c'e'
+    */
+    slot = sdict_find(self.table, key)
+    if slot == 0:
+        return ""
+    return dict_peek64(slot + 8)
+
+
+def Sdict_has(self: Sdict, key: str) -> int:
+    /*
+    * Controlla se una chiave e' presente.
+    * argomenti:
+    *   key: la chiave
+    * return: 1 se c'e', 0 altrimenti
+    */
+    if sdict_find(self.table, key) == 0:
+        return 0
+    return 1
+
+
+def Sdict_remove(self: Sdict, key: str) -> int:
+    /*
+    * Toglie una chiave.
+    * argomenti:
+    *   key: la chiave
+    * return: 1 se c'era, 0 altrimenti
+    */
+    return sdict_del(self.table, key)
+
+
+def Sdict_count(self: Sdict) -> int:
+    /*
+    * Restituisce il numero di chiavi presenti.
+    * return: il numero di chiavi
+    */
+    return sdict_count(self.table)
+
+
+def Sdict_reset(self: Sdict) -> None:
+    /*
+    * Riporta il cursore prima della prima coppia.
+    * return: nessuno (procedura)
+    */
+    self.iter_idx = 0
+    return
+
+
+def Sdict_next(self: Sdict) -> int:
+    /*
+    * Porta il cursore sulla coppia successiva, che si legge poi con key() e
+    * value().
+    * return: 1 se c'e', 0 alla fine
+    */
+    i = sdict_next_slot(self.table, self.iter_idx)
+    if i < 0:
+        self.iter_idx = sdict_capacity(self.table)
+        return 0
+    self.iter_key = sdict_key_at(self.table, i)
+    self.iter_value = sdict_value_at(self.table, i)
+    self.iter_idx = i + 1
+    return 1
+
+
+def Sdict_key(self: Sdict) -> str:
+    /*
+    * Restituisce la chiave della coppia sotto il cursore.
+    * return: la chiave
+    */
+    return self.iter_key
+
+
+def Sdict_value(self: Sdict) -> str:
+    /*
+    * Restituisce il valore della coppia sotto il cursore.
+    * return: il valore
+    */
+    return self.iter_value
+
+
+/*
+* idict_*: hash map con chiavi 'int' e valori 'str', capacita' fissa
+* decisa alla creazione (open addressing, linear probing). La crea anche
+* un letterale con chiavi int: '{200: "OK", 404: "Not Found"}'.
+* idict_grow e idict_set_grow piu' sopra sono del dict con valori int,
+* non di questo.
+*
+* Layout di un handle 'd' (un blocco allocato con rt_alloc_up):
+*
+* +0  capacity (int, 4 byte) sempre una potenza di 2
+* +4  count    (int, 4 byte)
+* +8  slot[i]  = [ value: str (8) | key: int (4) | state: int (4) ]
+*
+* state: 0 mai usato, 1 occupato, 2 tombstone. I valori contano un
+* riferimento; liberata la tabella, il runtime li rilascia
+* (IDICT_TABLE_TYPE_ID).
+*/
+
+
+def idict_slot_of(key: int, mask: int) -> int:
+    /*
+    * Restituisce il primo slot da provare per una chiave int (hash di
+    * Fibonacci).
+    * argomenti:
+    *   key: la chiave
+    *   mask: la capacita' meno 1
+    * return: lo slot
+    */
+    h = key * -1640531527
+    h = h ^ (h >> 15)
+    return h & mask
+
+
+def idict_new(capacity: int) -> str:
+    /*
+    * Crea un idict (chiavi int, valori str) di capacita' fissa, arrotondata
+    * alla potenza di 2 successiva.
+    * argomenti:
+    *   capacity: il numero minimo di slot
+    * return: l'idict
+    */
+    cap = dict_next_pow2(capacity)
+    base = rt_alloc_up(8 + cap * 16)
+    dict_poke32(base, cap)
+    dict_poke32(base + 4, 0)
+    dict_poke32(base - 8, IDICT_TABLE_TYPE_ID)
+    return base
+
+
+def idict_capacity(d: str) -> int:
+    /*
+    * Restituisce il numero di slot di un idict.
+    * argomenti:
+    *   d: l'idict
+    * return: la capacita'
+    */
+    return dict_peek32(d)
+
+
+def idict_count(d: str) -> int:
+    /*
+    * Restituisce il numero di chiavi presenti in un idict.
+    * argomenti:
+    *   d: l'idict
+    * return: il numero di chiavi
+    */
+    return dict_peek32(d + 4)
+
+
+def idict_find(d: str, key: int) -> str:
+    /*
+    * Cerca lo slot di una chiave.
+    * argomenti:
+    *   d: l'idict
+    *   key: la chiave
+    * return: l'indirizzo dello slot, 0 se la chiave non c'e'
+    */
+    cap = dict_peek32(d)
+    mask = cap - 1
+    idx = idict_slot_of(key, mask)
+    i = 0
+    while i < cap:
+        slot = d + (8 + idx * 16)
+        state = dict_peek32(slot + 12)
+        if state == 0:
+            return 0 as str
+        if state == 1 and dict_peek32(slot + 8) == key:
+            return slot
+        idx = (idx + 1) & mask
+        i = i + 1
+    return 0 as str
+
+
+def idict_free_slot(d: str, key: int) -> str:
+    /*
+    * Cerca il primo slot libero (vuoto o cancellato) sulla strada di una
+    * chiave.
+    * argomenti:
+    *   d: l'idict
+    *   key: la chiave
+    * return: l'indirizzo dello slot, 0 se la tabella e' piena
+    */
+    cap = dict_peek32(d)
+    mask = cap - 1
+    idx = idict_slot_of(key, mask)
+    i = 0
+    while i < cap:
+        slot = d + (8 + idx * 16)
+        if dict_peek32(slot + 12) != 1:
+            return slot
+        idx = (idx + 1) & mask
+        i = i + 1
+    return 0 as str
+
+
+def idict_set(d: str, key: int, value: str) -> int:
+    /*
+    * Inserisce o aggiorna key -> value; la tabella tiene un riferimento al
+    * valore.
+    * argomenti:
+    *   d: l'idict
+    *   key: la chiave
+    *   value: il valore
+    * return: 1 se riuscito, 0 se la tabella e' piena
+    */
+    slot = idict_find(d, key)
+    if slot == 0:
+        slot = idict_free_slot(d, key)
+        if slot == 0:
+            return 0
+        dict_poke32(slot + 8, key)
+        dict_poke32(slot + 12, 1)
+        dict_poke32(d + 4, dict_peek32(d + 4) + 1)
+    old = dict_peek64(slot)
+    rt_rc_retain(value)
+    dict_poke64_raw(slot, value)
+    rt_rc_release(old)
+    return 1
+
+
+def idict_get(d: str, key: int) -> str:
+    /*
+    * Restituisce il valore di una chiave.
+    * argomenti:
+    *   d: l'idict
+    *   key: la chiave
+    * return: il valore, "" se la chiave non c'e' (se "" e' un valore valido si
+    *   controlla prima idict_has)
+    */
+    slot = idict_find(d, key)
+    if slot == 0:
+        return ""
+    return dict_peek64(slot)
+
+
+def idict_has(d: str, key: int) -> int:
+    /*
+    * Controlla se una chiave e' presente.
+    * argomenti:
+    *   d: l'idict
+    *   key: la chiave
+    * return: 1 se c'e', 0 altrimenti
+    */
+    if idict_find(d, key) == 0:
+        return 0
+    return 1
+
+
+def idict_del(d: str, key: int) -> int:
+    /*
+    * Toglie una chiave e rilascia il valore.
+    * argomenti:
+    *   d: l'idict
+    *   key: la chiave
+    * return: 1 se c'era, 0 altrimenti
+    */
+    slot = idict_find(d, key)
+    if slot == 0:
+        return 0
+    old = dict_peek64(slot)
+    dict_poke64_raw(slot, 0 as str)
+    dict_poke32(slot + 12, 2)
+    dict_poke32(d + 4, dict_peek32(d + 4) - 1)
+    rt_rc_release(old)
+    return 1

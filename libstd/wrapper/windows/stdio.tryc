@@ -1,0 +1,45 @@
+/*
+* Windows x64: sys_read con ReadFile, o recv per una socket (i file
+* descriptor: vedi wrapper/windows/kernel32). sys_write e' del runtime.
+*/
+
+#include <libstd/wrapper/windows/kernel32>
+
+// ReadFile legge meno di 4 GB per volta: qui al massimo 1 GB
+#define WIN_MAX_IO 1073741824
+
+
+extern def ReadFile(file: long, buffer: str, to_read: long, read: &int, overlapped: long) -> int
+
+
+def sys_read(fd: int, start_offs: str, length: long) -> int:
+    /*
+    * Legge byte da un file descriptor, come la syscall read di Linux: con
+    * ReadFile, o con recv per una socket.
+    * argomenti:
+    *   fd: il file descriptor
+    *   start_offs: il buffer in cui scrivere
+    *   length: quanti byte leggere al massimo (non piu' di 1 GB per volta)
+    * return: i byte letti, 0 a fine dati (anche con la pipe chiusa
+    *   dall'altra parte), -errno in caso di errore
+    */
+    count = length
+    if count > WIN_MAX_IO as long:
+        count = WIN_MAX_IO as long
+
+    if win_is_socket(fd) != 0:
+        unsafe:
+            ws_recv = winsock_fn("recv") as &(long, str, long, int) -> int
+        received = ws_recv(fd, start_offs, count, 0)
+        if received < 0:
+            return winsock_error()
+        return received
+
+    n = 0
+    if ReadFile(win_handle(fd), start_offs, count, &n, 0 as long) == 0:
+        err = GetLastError()
+        if err == ERROR_BROKEN_PIPE:
+            return 0
+        return win_error(err)
+
+    return n

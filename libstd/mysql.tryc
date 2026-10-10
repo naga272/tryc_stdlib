@@ -1,0 +1,243 @@
+/*
+* mysql: binding a libmariadb, il client C di MySQL e MariaDB
+* (mysql/mysql.h), con funzioni di comodo per connettersi, eseguire query e
+* leggere i risultati.
+*/
+
+#ifdef __unix__
+libextern <libmariadb.so>
+#else
+// MariaDB Connector/C per Windows, la stessa API di libmariadb.so.
+// Non e' una DLL di sistema:
+// la cartella di libmariadb.dll va nel PATH,
+// per compilare e per eseguire
+libextern <libmariadb.dll>
+#endif
+
+#include <libstd/stdio>
+
+
+// porta di default del protocollo MySQL
+#define MYSQL_DEFAULT_PORT 3306
+
+
+extern class MYSQL
+extern class MYSQL_RES
+
+extern def mysql_init(mysql: MYSQL) -> MYSQL
+
+extern def mysql_real_connect(mysql: MYSQL, host: str, user: str, passwd: str, db: str, port: int, socket: str, flags: long) -> MYSQL
+
+extern def mysql_close(mysql: MYSQL) -> None
+
+extern def mysql_ping(mysql: MYSQL) -> int
+
+extern def mysql_get_client_info() -> str
+
+extern def mysql_get_server_info(mysql: MYSQL) -> str
+
+extern def mysql_query(mysql: MYSQL, query: str) -> int
+
+extern def mysql_error(mysql: MYSQL) -> str
+
+extern def mysql_errno(mysql: MYSQL) -> int
+
+extern def mysql_affected_rows(mysql: MYSQL) -> long
+
+extern def mysql_insert_id(mysql: MYSQL) -> long
+
+extern def mysql_real_escape_string(mysql: MYSQL, to: str, src: str, length: long) -> long
+
+extern def mysql_store_result(mysql: MYSQL) -> MYSQL_RES
+
+extern def mysql_use_result(mysql: MYSQL) -> MYSQL_RES
+
+extern def mysql_free_result(result: MYSQL_RES) -> None
+
+extern def mysql_num_rows(result: MYSQL_RES) -> long
+
+extern def mysql_num_fields(result: MYSQL_RES) -> int
+
+extern def mysql_field_count(mysql: MYSQL) -> int
+
+/*
+* TODO: in Tryc le stringhe hanno un header che traccia la loro lunghezza
+* MYSQL_RES e' un char**, se uso un'array di str direttamente
+* vengono inclusi anche gli header, quindi vengono causati errori
+* imprevedibili
+*/
+
+extern def mysql_fetch_row(result: MYSQL_RES) -> str
+
+// restituisce unsigned long* in C
+extern def mysql_fetch_lengths(result: MYSQL_RES) -> str
+
+extern def mysql_fetch_field(result: MYSQL_RES) -> str
+
+
+def mysql_checker_error(mysql: MYSQL, response: int) -> int:
+    /*
+    * Controlla il codice di ritorno di un'operazione mysql, 0 se riuscita:
+    * in caso di errore stampa il messaggio, chiude la connessione e termina il
+    * programma.
+    * argomenti:
+    *   mysql: la connessione
+    *   response: il codice da controllare
+    * return: response
+    */
+    if response != 0:
+        print("mysql error: " + mysql_error(mysql) + "\n")
+        mysql_close(mysql)
+        exit(1)
+
+    return response
+
+
+def mysql_connect_or_die(host: str, user: str, passwd: str, db: str, port: int) -> MYSQL:
+    /*
+    * Apre una connessione al server; se non ci riesce stampa l'errore e
+    * termina il programma.
+    * argomenti:
+    *   host: l'indirizzo del server, es. "127.0.0.1"
+    *   user: l'utente
+    *   passwd: la password, "" se non c'e'
+    *   db: il database da usare, '0 as str' per nessuno
+    *   port: la porta TCP, 0 per MYSQL_DEFAULT_PORT
+    * return: la connessione
+    */
+    mysql = mysql_init(0 as MYSQL)
+    if mysql == (0 as MYSQL):
+        print("mysql_init: memoria esaurita\n")
+        exit(1)
+
+    conn = mysql_real_connect(mysql, host, user, passwd, db, port, 0 as str, 0)
+    if conn == (0 as MYSQL):
+        print("mysql_real_connect: " + mysql_error(mysql) + "\n")
+        mysql_close(mysql)
+        exit(1)
+
+    return conn
+
+
+def mysql_query_w(mysql: MYSQL, query: str) -> int:
+    /*
+    * Esegue una query che non restituisce righe (INSERT, UPDATE, DELETE,
+    * CREATE TABLE...); in caso di errore termina il programma.
+    * argomenti:
+    *   mysql: la connessione
+    *   query: la query
+    * return: 0
+    */
+    response = mysql_query(mysql, query)
+    return mysql_checker_error(mysql, response)
+
+
+def mysql_query_result(mysql: MYSQL, query: str) -> MYSQL_RES:
+    /*
+    * Esegue una query che restituisce righe (SELECT) e ne scarica tutti i
+    * risultati; in caso di errore termina il programma.
+    * argomenti:
+    *   mysql: la connessione
+    *   query: la query
+    * return: il result set, da liberare con mysql_free_result
+    */
+    mysql_checker_error(mysql, mysql_query(mysql, query))
+
+    result = mysql_store_result(mysql)
+    if result == 0:
+        print("mysql_store_result: " + mysql_error(mysql) + "\n")
+        mysql_close(mysql)
+        exit(1)
+
+    return result
+
+
+def mysql_row_is_null(row: str, index: int) -> int:
+    /*
+    * Controlla se un campo di una riga e' NULL: mysql_row_get restituisce ""
+    * sia per NULL sia per una stringa vuota.
+    * argomenti:
+    *   row: la riga, da mysql_fetch_row
+    *   index: la colonna, da 0
+    * return: 1 se e' NULL, 0 altrimenti
+    */
+    unsafe:
+        fields = row as ptr str
+        field = fields[index]
+    if field == 0:
+        return 1
+
+    return 0
+
+
+def mysql_row_get(row: str, index: int) -> str:
+    /*
+    * Legge un campo di una riga come stringa.
+    * argomenti:
+    *   row: la riga, da mysql_fetch_row
+    *   index: la colonna, da 0
+    * return: il valore, "" se e' NULL
+    */
+    unsafe:
+        fields = row as ptr str
+        field = fields[index]
+    if field == 0:
+        return ""
+
+    return field
+
+
+def mysql_field_name(result: MYSQL_RES) -> str:
+    /*
+    * Restituisce il nome della prossima colonna del result set: chiamata
+    * mysql_num_fields(result) volte, da' i nomi di tutte le colonne in ordine.
+    * argomenti:
+    *   result: il result set
+    * return: il nome, "" quando le colonne sono finite
+    */
+    field_ptr = mysql_fetch_field(result)
+    if field_ptr == 0:
+        return ""
+
+    unsafe:
+        names = field_ptr as ptr str
+    return names[0]
+
+
+def mysql_escape(mysql: MYSQL, value: str) -> str:
+    /*
+    * Restituisce una copia del testo con i caratteri speciali di SQL
+    * (apici, backslash...) protetti, per mettere in una query un valore che
+    * viene da fuori senza rischiare una SQL injection. Usa il charset della
+    * connessione.
+    * argomenti:
+    *   mysql: la connessione, aperta
+    *   value: il testo
+    * return: il testo protetto
+    */
+    n = strlen(value)
+    buf = rt_alloc_up(n * 2 + 1)
+    mysql_real_escape_string(mysql, buf, value, n)
+    return buf
+
+
+def mysql_print_result(result: MYSQL_RES) -> None:
+    /*
+    * Stampa tutte le righe di un result set, una per linea, con i campi
+    * separati da " | ", senza allineare le colonne.
+    * argomenti:
+    *   result: il result set
+    * return: nessuno (procedura)
+    */
+    n = mysql_num_fields(result)
+    row = mysql_fetch_row(result)
+    while row != 0:
+        i = 0
+        line = ""
+        while i < n:
+            if i > 0:
+                line = line + " | "
+            line = line + mysql_row_get(row, i)
+            i++
+        print(line + "\n")
+        row = mysql_fetch_row(result)

@@ -1,0 +1,2594 @@
+#include <libstd/string>
+#include <libstd/type>
+#include <libstd/list>
+#include <libstd/stdio>
+#include <libstd/dict>
+
+/*
+* re: espressioni regolari, sul modello del modulo re di Python.
+*
+* Sintassi:
+*   letterali e '.', un carattere qualunque (anche a capo)
+*   '^' inizio del testo, '$' fine del testo (solo in fondo al pattern)
+*   classi '[abc]', '[^abc]', '[a-z]'
+*   quantificatori '*', '+', '?', '{m}', '{m,}', '{m,n}', tutti greedy
+*   alternanza 'a|b', anche dentro un gruppo
+*   gruppi '(...)' con cattura e '(?:...)' senza
+*   lookahead '(?=...)' e '(?!...)'
+*   backreference '\1'-'\9'
+*   '\d' '\D' '\w' '\W' '\s' '\S', '\n' '\t' '\r'; davanti a ogni altro
+*   carattere '\' lo rende letterale ('\.' e' un punto)
+*
+* Non ci sono lookbehind, ricerca case-insensitive e classi POSIX
+* ('[:alpha:]'). Un pattern che non si sa compilare viene stampato e il
+* programma termina (re_unsupported).
+*
+* Dopo re_match, re_search o re_fullmatch, group(n) restituisce il testo
+* del gruppo n dell'ultimo match (n da 1 a CAPTURE_MAX, 0 per l'intero
+* match); un gruppo ripetuto tiene l'ultima iterazione. Lo stato e'
+* globale: snapshot_match() ne fa una copia che sopravvive ai match
+* successivi.
+*
+* Il pattern viene compilato in un programma per una macchina virtuale
+* con backtracking, come in CPython, e il programma resta in cache: lo
+* stesso pattern usato in un ciclo si compila una volta sola.
+*/
+
+
+def atom_len(pattern: str) -> int:
+    /*
+    * Restituisce quanti caratteri del pattern occupa il prossimo atomo: un
+    * letterale, un escape '\X', '.', una classe '[...]' o un gruppo '(...)'
+    * intero, parentesi comprese.
+    * argomenti:
+    *   pattern: l'inizio dell'atomo nel pattern
+    * return: la lunghezza; 1 se la classe o il gruppo non e' chiuso, e allora
+    *   '[' o '(' vale come letterale
+    */
+    first_char = pattern[0]
+    if first_char == '\\':
+        if pattern[1] == '\0':
+            return 1
+        return 2
+
+    if first_char == '[':
+        i = 1
+        char_of_str = pattern[i]
+        if char_of_str == '^' or char_of_str == ']':
+            i++
+
+        while pattern[i] != ']':
+            if pattern[i] == '\0':
+                return 1
+
+            if pattern[i] == '\\':
+                if pattern[i + 1] == '\0':
+                    return 1
+                i = i + 2
+                continue
+            i++
+        return i + 1
+
+    if first_char == '(':
+        depth = 1
+        i = 1
+        while depth > 0:
+            if pattern[i] == '\0':
+                return 1
+
+            if pattern[i] == '\\':
+                if pattern[i + 1] == '\0':
+                    return 1
+
+                i = i + 2
+                continue
+
+            if pattern[i] == '[':
+                i = i + atom_len(pattern + i)
+                continue
+
+            if pattern[i] == '(':
+                depth++
+
+            if pattern[i] == ')':
+                depth--
+            i++
+
+        return i
+
+    return 1
+
+
+__re_classe_caratteri = {
+    "d": "s",
+    "D": "S",
+    "w": "w",
+    "W": "W",
+    "s": "s",
+    "S": "S"
+}
+
+
+def is_shorthand_letter(letter: char) -> int:
+    /*
+    * Controlla se la lettera dopo un '\' indica una classe abbreviata (d, D,
+    * w, W, s, S).
+    * argomenti:
+    *   letter: la lettera
+    * return: 1 se lo e', 0 altrimenti
+    */
+    if sdict_has(__re_classe_caratteri, letter + "\0"):
+        return 1
+    return 0
+
+
+def escaped_literal_char(letter: char) -> char:
+    /*
+    * Restituisce il carattere che rappresenta un '\' seguito da letter,
+    * quando non e' una classe abbreviata: 'n', 't' e 'r' sono a capo, tab e
+    * CR, gli altri restano se stessi ('\.' e' '.').
+    * argomenti:
+    *   letter: la lettera dopo il '\'
+    * return: il carattere
+    */
+    if letter == 'n':
+        return '\n'
+    if letter == 't':
+        return '\t'
+    if letter == 'r':
+        return '\r'
+    return letter
+
+
+def is_space_char(c: char) -> int:
+    /*
+    * Controlla se un carattere e' spazio bianco per '\s': spazio, tab, a capo
+    * o CR.
+    * argomenti:
+    *   c: il carattere
+    * return: 1 se lo e', 0 altrimenti
+    */
+    if c == ' ':
+        return 1
+    if c == '\t':
+        return 1
+    if c == '\n':
+        return 1
+    if c == '\r':
+        return 1
+    return 0
+
+
+def is_word_char(c: char) -> int:
+    /*
+    * Controlla se un carattere e' di parola per '\w': lettera, cifra o '_'.
+    * argomenti:
+    *   c: il carattere
+    * return: 1 se lo e', 0 altrimenti
+    */
+    if isalpha(c):
+        return 1
+    if c == '_':
+        return 1
+    return 0
+
+
+def shorthand_class_match(letter: char, c: char) -> int:
+    /*
+    * Controlla se un carattere appartiene a una classe abbreviata: '\d',
+    * '\w', '\s' e le loro negazioni in maiuscolo.
+    * argomenti:
+    *   letter: d, D, w, W, s o S
+    *   c: il carattere
+    * return: 1 se appartiene, 0 altrimenti
+    */
+    if letter == 'd':
+        return isnumeric(c)
+
+    if letter == 'D':
+        if isnumeric(c):
+            return 0
+        return 1
+
+    if letter == 'w':
+        return is_word_char(c)
+
+    if letter == 'W':
+        if is_word_char(c):
+            return 0
+        return 1
+
+    if letter == 's':
+        return is_space_char(c)
+
+    if letter == 'S':
+        if is_space_char(c):
+            return 0
+        return 1
+
+    return 0
+
+
+def class_match_slow(atom: str, alen: int, c: char) -> int:
+    /*
+    * Controlla se un carattere appartiene a una classe '[...]' o '[^...]',
+    * con range ('a-z') e classi abbreviate, rileggendo la classe ogni volta.
+    * argomenti:
+    *   atom: la '[' della classe nel pattern
+    *   alen: la lunghezza della classe, parentesi comprese (atom_len)
+    *   c: il carattere
+    * return: 1 se appartiene, 0 altrimenti
+    */
+    negate = 0
+    i = 1
+    if atom[1] == '^':
+        negate = 1
+        i = 2
+
+    found = 0
+
+    if atom[i] == ']':
+        if c == ']':
+            found = 1
+        i++
+
+    while i < alen - 1:
+        is_escape = 0
+        if atom[i] == '\\':
+            if i + 1 < alen - 1:
+                is_escape = 1
+
+        if is_escape == 1:
+            if is_shorthand_letter(atom[i + 1]):
+                if shorthand_class_match(atom[i + 1], c):
+                    found = 1
+            if is_shorthand_letter(atom[i + 1]) == 0:
+                if escaped_literal_char(atom[i + 1]) == c:
+                    found = 1
+            i = i + 2
+
+        if is_escape == 0:
+            is_range = 0
+            if i + 2 < alen - 1:
+                if atom[i + 1] == '-':
+                    is_range = 1
+
+            if is_range == 1:
+                lo = char_to_int(atom[i])
+                hi = char_to_int(atom[i + 2])
+                cv = char_to_int(c)
+                in_range = 1
+                if cv < lo:
+                    in_range = 0
+                if cv > hi:
+                    in_range = 0
+                if in_range == 1:
+                    found = 1
+                i = i + 3
+
+            if is_range == 0:
+                if atom[i] == c:
+                    found = 1
+                i++
+
+    if negate == 1:
+        if found == 1:
+            return 0
+        return 1
+    return found
+
+
+/*
+* Cache delle classi '[...]': ogni classe viene tradotta una volta in una
+* tabella di 256 voci, cercata per indirizzo e lunghezza dell'atomo (un
+* pattern compilato resta fermo in memoria).
+*/
+CLASS_CACHE_SIZE = 32
+
+class_cache_addr = new long[32]
+class_cache_alen = new int[32]
+class_cache_valid = new int[32]
+// 32 tabelle da 256 voci, appiattite: la voce 'c' della tabella 'k' sta
+// all'indice k * 256 + c
+class_cache_table = new int[8192]
+class_cache_next = 0
+
+// l'ultimo slot trovato, controllato prima di scorrere la cache
+class_cache_last_hit = -1
+
+
+inline def class_match(atom: str, alen: int, c: char) -> int:
+    /*
+    * Come class_match_slow, ma da una tabella di 256 voci calcolata una
+    * volta per classe.
+    * argomenti:
+    *   atom: la '[' della classe nel pattern
+    *   alen: la lunghezza della classe
+    *   c: il carattere
+    * return: 1 se appartiene, 0 altrimenti
+    */
+    c_int = c as int
+    unsafe:
+        addr = atom as long
+
+    if class_cache_last_hit >= 0:
+        h = class_cache_last_hit
+        if class_cache_valid[h] == 1:
+            if class_cache_alen[h] == alen:
+                if class_cache_addr[h] == addr:
+                    return class_cache_table[h * 256 + c_int]
+
+    k = 0
+    while k < CLASS_CACHE_SIZE:
+        if class_cache_valid[k] == 1:
+            if class_cache_alen[k] == alen:
+                if class_cache_addr[k] == addr:
+                    class_cache_last_hit = k
+                    return class_cache_table[k * 256 + c_int]
+        k++
+
+    slot = class_cache_next
+    base = slot * 256
+    v = 0
+    while v < 256:
+        class_cache_table[base + v] = class_match_slow(atom, alen, int_to_char(v))
+        v++
+
+    class_cache_addr[slot] = addr
+    class_cache_alen[slot] = alen
+    class_cache_valid[slot] = 1
+
+    class_cache_next = slot + 1
+    if class_cache_next >= CLASS_CACHE_SIZE:
+        class_cache_next = 0
+
+    class_cache_last_hit = slot
+    return class_cache_table[base + c_int]
+
+
+def atom_match(atom: str, alen: int, c: char) -> int:
+    /*
+    * Controlla se un carattere soddisfa un atomo del pattern che non sia un
+    * gruppo: un letterale, '.', un escape o una classe.
+    * argomenti:
+    *   atom: l'atomo nel pattern
+    *   alen: la sua lunghezza (atom_len)
+    *   c: il carattere
+    * return: 1 se lo soddisfa, 0 altrimenti
+    */
+    first_char_atom = atom[0]
+    if first_char_atom == '\\':
+        if is_shorthand_letter(atom[1]):
+            return shorthand_class_match(atom[1], c)
+
+        if escaped_literal_char(atom[1]) == c:
+            return 1
+
+        return 0
+
+    if first_char_atom == '.' or first_char_atom == c:
+        return 1
+
+    if first_char_atom == '[':
+        return class_match(atom, alen, c)
+    return 0
+
+
+EXPAND_CACHE_SIZE = 8
+
+
+/*
+* Catture: ogni gruppo catturante compila in due OP_MARK, all'inizio e
+* alla fine del corpo, che registrano la posizione corrente. Il gruppo 0,
+* l'intero match, lo registrano re_match, re_search e re_fullmatch.
+*/
+
+// numero massimo di gruppi catturanti in un pattern
+CAPTURE_MAX = 32
+
+// il testo della ricerca in corso. Le catture sono offset 'int' da qui e
+// non puntatori, e capture_text_base si scrive solo con
+// set_capture_text_base: riassegnare una globale 'str' la promuoverebbe
+// alla radice dell'arena a ogni cattura, senza liberare la precedente
+capture_text_base = ""
+
+// indice 0 = l'intero match, 1..CAPTURE_MAX = i gruppi catturanti -
+// 'capture_valid[n]' distingue "non catturato" da "catturato, vuoto"
+capture_start = new int[CAPTURE_MAX + 1]
+capture_end = new int[CAPTURE_MAX + 1]
+capture_valid = new int[CAPTURE_MAX + 1]
+
+// contatore usato solo durante la compilazione, per numerare i gruppi
+// nell'ordine in cui la loro '(' compare nel pattern
+capture_group_count = 0
+
+// la classe del primo atomo, per il percorso veloce di re_search
+// (build_class_lut)
+class_lut = new int[256]
+
+// pattern e istruzione da cui e' stata costruita class_lut, per non
+// ricostruirla a ogni match dello stesso pattern. class_lut_src prende
+// solo valori di prog_src, gia' posseduti dalla cache di re_compile
+class_lut_src = ""
+class_lut_pc = -1
+
+
+def ptr_diff(a: str, b: str) -> int:
+    /*
+    * Restituisce a - b, la distanza in byte fra due punti della stessa
+    * stringa.
+    * argomenti:
+    *   a, b: i due punti
+    * return: la distanza
+    */
+#ifdef __aarch64__
+    asminline(
+        sub x0, x0, x1
+    ) endasm
+#else
+    asminline(
+        mov rax, rdi
+        sub rax, rsi
+    ) endasm
+#endif
+
+
+def set_capture_text_base(t: str) -> int:
+    /*
+    * Registra il testo della ricerca in corso, da cui si contano le
+    * posizioni delle catture.
+    * argomenti:
+    *   t: il testo
+    * return: un valore da ignorare
+    */
+#ifdef __aarch64__
+    asminline(
+        str x0, [capture_text_base]
+    ) endasm
+#else
+    asminline(
+        mov [capture_text_base], rdi
+    ) endasm
+#endif
+
+
+inline def mark_start_char() -> char:
+    /*
+    * Restituisce il carattere 0x01, il marcatore di inizio di un gruppo
+    * catturato.
+    * return: il carattere
+    */
+    return int_to_char(1)
+
+
+inline def mark_end_char() -> char:
+    /*
+    * Restituisce il carattere 0x02, il marcatore di fine di un gruppo
+    * catturato.
+    * return: il carattere
+    */
+    return int_to_char(2)
+
+
+def reset_captures() -> int:
+    /*
+    * Segna tutte le catture come non valide, prima di una nuova ricerca.
+    * return: 0
+    */
+    n = 0
+    while n <= CAPTURE_MAX:
+        capture_valid[n] = 0
+        n++
+    return 0
+
+
+def record_group_start(n: int, pos: str) -> int:
+    /*
+    * Registra dove inizia un gruppo, come offset dal testo della ricerca.
+    * argomenti:
+    *   n: il gruppo, da 0 a CAPTURE_MAX
+    *   pos: la posizione nel testo
+    * return: 0
+    */
+    off = ptr_diff(pos, capture_text_base)
+    if n < 0:
+        return 0
+
+    if n <= CAPTURE_MAX:
+        capture_start[n] = off
+
+    return 0
+
+
+def record_group_end(n: int, pos: str) -> int:
+    /*
+    * Registra dove finisce un gruppo e lo segna come valido.
+    * argomenti:
+    *   n: il gruppo, da 0 a CAPTURE_MAX
+    *   pos: la posizione nel testo
+    * return: 0
+    */
+    off = ptr_diff(pos, capture_text_base)
+    if n < 0:
+        return 0
+
+    if n > CAPTURE_MAX:
+        return 0
+
+    capture_end[n] = off
+    capture_valid[n] = 1
+    return 0
+
+
+def group(n: int) -> str:
+    /*
+    * Restituisce il testo catturato da un gruppo nell'ultima re_match,
+    * re_search o re_fullmatch, come m.group(n) di Python.
+    * argomenti:
+    *   n: il gruppo, da 1 a CAPTURE_MAX, oppure 0 per l'intero match
+    * return: il testo, "" se il gruppo non esiste, non ha partecipato al
+    *   match o n e' fuori da 0-CAPTURE_MAX
+    */
+    if n < 0:
+        return ""
+
+    if n > CAPTURE_MAX:
+        return ""
+
+    if capture_valid[n] == 0:
+        return ""
+
+    start = capture_text_base + capture_start[n]
+
+    length = capture_end[n] - capture_start[n]
+    return substrget(start, length)
+
+
+def is_group_valid(n: int) -> int:
+    /*
+    * Controlla se un gruppo ha catturato qualcosa nell'ultimo match, anche
+    * un testo vuoto.
+    * argomenti:
+    *   n: il gruppo, 0 per l'intero match
+    * return: 1 se si', 0 altrimenti (anche con n fuori da 0-CAPTURE_MAX)
+    */
+    if n < 0:
+        return 0
+
+    if n > CAPTURE_MAX:
+        return 0
+
+    return capture_valid[n]
+
+
+def match_rest() -> str:
+    /*
+    * Restituisce il testo che segue l'ultimo match, da cui continuare la
+    * ricerca.
+    * return: un punto dentro il testo, "" senza un match valido
+    */
+    if capture_valid[0] == 0:
+        return ""
+
+    return capture_text_base + capture_end[0]
+
+
+def match_start() -> str:
+    /*
+    * Restituisce il punto del testo in cui comincia l'ultimo match.
+    * return: un punto dentro il testo, "" senza un match valido
+    */
+    if capture_valid[0] == 0:
+        return ""
+    return capture_text_base + capture_start[0]
+
+
+/*
+* La copia dei gruppi di un match, fatta da snapshot_match(): resta valida
+* anche dopo altri match.
+* campi:
+*   texts: il testo di ogni gruppo, da 0 a CAPTURE_MAX ("" se non ha
+*     catturato)
+*   valid: 1 per i gruppi che hanno catturato
+*/
+class MatchResult:
+    texts List
+    valid int[33]
+    get &match_result_group
+    is_valid &match_result_is_valid
+
+
+def match_result_group(self: MatchResult, n: int) -> str:
+    /*
+    * Come group(n), ma sulla copia salvata nel MatchResult, valida anche
+    * dopo altri match.
+    * argomenti:
+    *   n: il gruppo, 0 per l'intero match
+    * return: il testo, "" fuori da 0-CAPTURE_MAX
+    */
+    if n < 0 or n > CAPTURE_MAX:
+        return ""
+
+    return list_get(self.texts, n) as str
+
+
+def match_result_is_valid(self: MatchResult, n: int) -> int:
+    /*
+    * Come is_group_valid(n), sulla copia salvata nel MatchResult.
+    * argomenti:
+    *   n: il gruppo, 0 per l'intero match
+    * return: 1 se il gruppo aveva catturato, 0 altrimenti
+    */
+    if n < 0 or n > CAPTURE_MAX:
+        return 0
+
+    return self.valid[n]
+
+
+def re_sub_cb(pattern: str, callback: &(str) -> str, text: str) -> str:
+    /*
+    * Sostituisce ogni occorrenza non sovrapposta del pattern con il testo
+    * che callback restituisce per quel match, come re.sub(pattern, funzione,
+    * text) di Python.
+    * argomenti:
+    *   pattern: il pattern
+    *   callback: la funzione, che riceve il testo del match e restituisce il
+    *     sostituto
+    *   text: il testo
+    * return: il testo nuovo
+    */
+    pezzi = list_new()
+    totale = 0 as long
+
+    rest = text
+    while 1:
+        m = re_finditer_next(pattern, rest)
+        if is_group_valid(0) == 0:
+            break
+
+        prefix_len = ptr_diff(match_start(), rest)
+        prefix = substrget(rest, prefix_len)
+
+        list_push(pezzi, prefix)
+        totale = totale + prefix_len
+
+        sostituto = callback(m)
+        list_push(pezzi, sostituto)
+        totale = totale + strlen(sostituto)
+
+        rest = match_rest()
+        if strlen(m) != 0:
+            continue
+
+        if rest[0] == '\0':
+            break
+
+        pezzo_singolo = substrget(rest, 1)
+        list_push(pezzi, pezzo_singolo)
+        totale = totale + 1
+        rest = rest + 1
+
+    len_rest = strlen(rest)
+    totale = totale + len_rest
+
+    buf = rt_alloc_up(totale + 1)
+    pos = 0 as long
+
+    idx_pezzo = 0 as long
+    n_pezzi = list_length(pezzi)
+    while idx_pezzo < n_pezzi:
+        pezzo = list_get(pezzi, idx_pezzo) as str
+        n = strlen(pezzo)
+        k = 0 as long
+        while k < n:
+            buf[pos] = pezzo[k]
+            pos++
+            k++
+        idx_pezzo++
+
+    k2 = 0 as long
+    while k2 < len_rest:
+        buf[pos] = rest[k2]
+        pos++
+        k2++
+
+    buf[pos] = '\0'
+    return buf
+
+
+def snapshot_match() -> MatchResult:
+    /*
+    * Salva i gruppi dell'ultimo match in un MatchResult, che resta valido
+    * anche dopo altri match. Va chiamata subito dopo la ricerca.
+    * return: il MatchResult, con is_valid(0) a 0 se non c'era un match
+    */
+    m = new MatchResult()
+    m.texts.cap = 0 as long
+    m.texts.length = 0 as long
+    i = 0
+    while i <= CAPTURE_MAX:
+        m.valid[i] = capture_valid[i]
+        if capture_valid[i] != 0:
+            start = capture_text_base + capture_start[i]
+            length = capture_end[i] - capture_start[i]
+            testo_gruppo = substrget(start, length)
+            list_push(m.texts, testo_gruppo)
+        else:
+            list_push(m.texts, "")
+        i = i + 1
+    return m
+
+
+/*
+* Un pattern da usare su molti testi, creato da compile_pattern().
+* campi:
+*   pattern: il testo del pattern
+*/
+class CompiledPattern:
+    pattern str
+    match &pattern_match
+    fullmatch &pattern_fullmatch
+    search &pattern_search
+    sub &pattern_sub
+    sub_cb &pattern_sub_cb
+    group &pattern_group
+    is_valid &pattern_is_valid
+    snapshot &pattern_snapshot
+
+
+def pattern_sub(self: CompiledPattern, replace: str, text: str) -> str:
+    /*
+    * Come re_sub, con questo pattern.
+    * argomenti:
+    *   replace: il testo di sostituzione, anche con '\1'-'\9'
+    *   text: il testo
+    * return: il testo nuovo
+    */
+    return re_sub(self.pattern, replace, text)
+
+
+def pattern_match(self: CompiledPattern, text: str) -> int:
+    /*
+    * Come re_match, con questo pattern.
+    * argomenti:
+    *   text: il testo
+    * return: 1 se combacia all'inizio del testo, 0 altrimenti
+    */
+    return re_match(self.pattern, text)
+
+
+def pattern_fullmatch(self: CompiledPattern, text: str) -> int:
+    /*
+    * Come re_fullmatch, con questo pattern.
+    * argomenti:
+    *   text: il testo
+    * return: 1 se combacia con tutto il testo, 0 altrimenti
+    */
+    return re_fullmatch(self.pattern, text)
+
+
+def pattern_search(self: CompiledPattern, text: str) -> int:
+    /*
+    * Come re_search, con questo pattern.
+    * argomenti:
+    *   text: il testo
+    * return: 1 se combacia in qualche punto, 0 altrimenti
+    */
+    return re_search(self.pattern, text)
+
+
+def pattern_group(self: CompiledPattern, n: int) -> str:
+    /*
+    * Come group(n): legge l'ultimo match, di qualunque pattern.
+    * argomenti:
+    *   n: il gruppo, 0 per l'intero match
+    * return: il testo del gruppo
+    */
+    return group(n)
+
+
+def pattern_is_valid(self: CompiledPattern, n: int) -> int:
+    /*
+    * Come is_group_valid(n).
+    * argomenti:
+    *   n: il gruppo, 0 per l'intero match
+    * return: 1 se il gruppo ha catturato, 0 altrimenti
+    */
+    return is_group_valid(n)
+
+
+def pattern_snapshot(self: CompiledPattern) -> MatchResult:
+    /*
+    * Come snapshot_match().
+    * return: il MatchResult
+    */
+    return snapshot_match()
+
+
+def pattern_sub_cb(self: CompiledPattern, callback: &(str) -> str, text: str) -> str:
+    /*
+    * Come re_sub_cb, con questo pattern.
+    * argomenti:
+    *   callback: la funzione che calcola il sostituto di ogni match
+    *   text: il testo
+    * return: il testo nuovo
+    */
+    return re_sub_cb(self.pattern, callback, text)
+
+
+def compile_pattern(pattern: str) -> CompiledPattern:
+    /*
+    * Prepara un pattern da usare su molti testi con i suoi metodi:
+    * p.match, p.fullmatch, p.search, p.sub, p.sub_cb, p.group, p.is_valid,
+    * p.snapshot. La compilazione avviene alla prima ricerca e resta in cache.
+    * argomenti:
+    *   pattern: il pattern
+    * return: il CompiledPattern
+    */
+    p = new CompiledPattern()
+    p.pattern = pattern
+    return p
+
+
+/*
+* Il programma compilato: un'istruzione per posizione negli array
+* paralleli prog_op, prog_a, prog_b e prog_c, a dimensione fissa, senza
+* allocazioni durante il match. Gli opcode riprendono quelli di CPython.
+*/
+OP_CHAR = 1        // a = codice del carattere
+OP_ANY = 2         // '.'
+OP_CLASS = 3       // a = offset della '[' nel pattern, b = lunghezza
+OP_SHORT = 4       // a = codice della lettera dopo '\' (d/D/w/W/s/S)
+OP_EOL = 5         // '$'
+OP_MATCH = 6       // successo
+// OP_REPEAT: a = minimo, b = massimo (-1 = illimitato). Si applica
+// all'istruzione seguente, e il resto del programma riprende da quella
+// dopo ancora.
+OP_REPEAT = 7
+
+// OP_MARK: registra la posizione corrente come inizio (b = 0) o fine
+// (b = 1) del gruppo 'a', senza consumare testo
+OP_MARK = 8
+
+// OP_ASSERT: lookahead, a = 0 per '(?=', 1 per '(?!'; b = istruzioni da
+// saltare per arrivare dopo il corpo, che finisce con un OP_MATCH suo.
+// Non consuma testo
+OP_ASSERT = 9
+
+// OP_GROUPREF: il testo deve ripetere quello catturato dal gruppo 'a';
+// fallisce se il gruppo non ha catturato
+OP_GROUPREF = 10
+
+// OP_BRANCH: un ramo dell'alternanza, b = istruzioni da saltare per
+// arrivare al ramo successivo (0 per l'ultimo).
+// OP_JUMP: salta all'istruzione 'a', chiude ogni ramo
+OP_BRANCH = 11
+OP_JUMP = 12
+
+// OP_BOL: '^', combacia solo all'inizio del testo (capture_text_base).
+// Un '^' iniziale senza alternanza diventa invece prog_anchored
+OP_BOL = 13
+
+// quante alternative di livello 0 si accettano in un pattern
+ALT_MAX = 16
+br_pos = new int[16]
+jp_pos = new int[16]
+
+RE_PROG_MAX = 128
+GRP_STACK_MAX = 16
+
+prog_op = new int[128]
+prog_a = new int[128]
+prog_b = new int[128]
+// per OP_REPEAT: quante istruzioni compongono il corpo da ripetere
+prog_c = new int[128]
+// stack dei gruppi aperti durante la compilazione, per far chiudere a
+// ogni ')' il gruppo giusto anche quando sono annidati
+grp_stack = new int[16]
+// posizione nel programma della prima istruzione di ogni gruppo aperto:
+// serve a sapere dove comincia il corpo, se poi arriva un
+// quantificatore
+grp_start = new int[16]
+/*
+* Che TIPO di parentesi e' ogni gruppo aperto:
+*   0 = '(...)'   catturante
+*   1 = '(?:...)' non catturante, solo raggruppamento
+*   2 = '(?=...)' lookahead positivo
+*   3 = '(?!...)' lookahead negativo
+* Serve alla ')' per sapere cosa emettere.
+*/
+grp_kind = new int[16]
+// posizione nel PATTERN della '(' di ogni gruppo aperto: serve a
+// rileggerne il contenuto quando arriva un quantificatore e bisogna
+// stabilire se il corpo possa combaciare col vuoto
+grp_src = new int[16]
+grp_depth = 0
+prog_len = 0
+prog_anchored = 0
+prog_src = ""
+prog_ok = 0
+// 1 se il programma in memoria finisce con OP_EOL (re_fullmatch): fa
+// parte della chiave della cache insieme al pattern
+prog_eol = 0
+
+// cache di re_compile: RE_CACHE_SIZE programmi compilati, sostituiti a
+// rotazione. 'new T[N]' vuole una dimensione letterale: qui sotto ci sono
+// 32 e 32 * RE_PROG_MAX, da aggiornare se cambia RE_CACHE_SIZE
+RE_CACHE_SIZE = 32
+re_cache_src = new str[32]
+re_cache_eol = new int[32]
+re_cache_valid = new int[32]
+re_cache_len = new int[32]
+re_cache_anchored = new int[32]
+re_cache_grp = new int[32]
+re_cache_op = new int[4096]
+re_cache_a = new int[4096]
+re_cache_b = new int[4096]
+re_cache_c = new int[4096]
+re_cache_next = 0
+
+// dove e' finito l'ultimo match riuscito della VM
+vm_end = ""
+
+
+def find_close_paren(pattern: str, open_at: int, stop: int) -> int:
+    /*
+    * Restituisce la posizione della ')' che chiude la '(' in open_at,
+    * tenendo conto di annidamento, escape e classi.
+    * argomenti:
+    *   pattern: il pattern
+    *   open_at: la posizione della '('
+    *   stop: dove smettere di cercare
+    * return: la posizione, -1 se non c'e'
+    */
+    d = 0
+    i = open_at
+    while i < stop:
+        c = pattern[i]
+        if c == '\\':
+            i = i + 2
+            continue
+        if c == '[':
+            i = i + atom_len(pattern + i)
+            continue
+        if c == '(':
+            d++
+        if c == ')':
+            d--
+            if d == 0:
+                return i
+        i++
+    return 0 - 1
+
+
+def find_alt_in_range(pattern: str, start: int, stop: int) -> int:
+    /*
+    * Restituisce il primo '|' fuori da gruppi e classi fra start e stop.
+    * argomenti:
+    *   pattern: il pattern
+    *   start, stop: l'intervallo, stop escluso
+    * return: la posizione, -1 se non c'e'
+    */
+    d = 0
+    i = start
+    while i < stop:
+        c = pattern[i]
+        if c == '\\':
+            i = i + 2
+            continue
+        if c == '[':
+            i = i + atom_len(pattern + i)
+            continue
+        if c == '(':
+            d++
+        if c == ')':
+            d--
+        if c == '|':
+            if d == 0:
+                return i
+        i++
+    return 0 - 1
+
+
+def seq_consumes_one(pattern: str, start: int, stop: int) -> int:
+    /*
+    * Controlla se una parte del pattern consuma di sicuro almeno un
+    * carattere, cioe' non puo' combaciare con il vuoto. Nei casi incerti
+    * risponde 0.
+    * argomenti:
+    *   pattern: il pattern
+    *   start, stop: la parte, stop escluso
+    * return: 1 se consuma almeno un carattere, 0 altrimenti
+    */
+    i = start
+    while i < stop:
+        c = pattern[i]
+
+        if c == '|':
+            return 0
+
+        alen = 1
+        if c == '\\':
+            alen = 2
+        else:
+            if c == '[':
+                alen = atom_len(pattern + i)
+            else:
+                if c == '(':
+                    ce = find_close_paren(pattern, i, stop)
+                    if ce == -1:
+                        return 0
+                    alen = ce - i + 1
+
+        j = i + alen
+        obbligatorio = 1
+
+        if j < stop:
+            q = pattern[j]
+            if q == '*':
+                obbligatorio = 0
+            if q == '?':
+                obbligatorio = 0
+            if q == '{':
+                if pattern[j + 1] == '0':
+                    obbligatorio = 0
+
+        if obbligatorio == 1:
+            if c == '(':
+                inner_from = i + 1
+                if pattern[i + 1] == '?':
+                    inner_from = i + 3
+                if seq_consumes_one(pattern, inner_from, i + alen - 1):
+                    return 1
+            else:
+                return 1
+
+        i = j
+        while i < stop:
+            q = pattern[i]
+            if q == '*':
+                i++
+                continue
+            if q == '+':
+                i++
+                continue
+            if q == '?':
+                i++
+                continue
+            if q == '{':
+                while i < stop:
+                    if pattern[i] == '}':
+                        i++
+                        break
+                    i++
+                continue
+            break
+
+    return 0
+
+
+def re_unsupported(pattern: str) -> int:
+    /*
+    * Stampa un pattern che re_compile non sa compilare e termina il
+    * programma: sintassi errata, un costrutto non supportato (lookbehind,
+    * alternanza in un lookahead, quantificatore su un'asserzione o su un
+    * backreference, '*' su un gruppo che puo' combaciare col vuoto) o un
+    * pattern oltre RE_PROG_MAX istruzioni, CAPTURE_MAX gruppi o ALT_MAX
+    * alternative.
+    * argomenti:
+    *   pattern: il pattern
+    * return: non ritorna
+    */
+    print("libstd/re: pattern non supportato: ")
+    print(pattern)
+    print("\n")
+    exit(1)
+    return 0
+
+
+def copy_block(from_pc: int, to_pc: int) -> int:
+    /*
+    * Copia in fondo al programma le istruzioni da from_pc a to_pc escluso,
+    * spostando i salti assoluti.
+    * argomenti:
+    *   from_pc, to_pc: l'intervallo da copiare
+    * return: 1 se copiato, 0 se il programma non ha piu' spazio
+    */
+    n = to_pc - from_pc
+    if prog_len + n > RE_PROG_MAX:
+        return 0
+
+    delta = prog_len - from_pc
+    k = 0
+    while k < n:
+        d = prog_len + k
+        s = from_pc + k
+        prog_op[d] = prog_op[s]
+        prog_a[d] = prog_a[s]
+        prog_b[d] = prog_b[s]
+        prog_c[d] = prog_c[s]
+        if prog_op[s] == OP_JUMP:
+            prog_a[d] = prog_a[s] + delta
+        k++
+
+    prog_len = prog_len + n
+    return 1
+
+
+def emit_opt_group(body_from: int) -> int:
+    /*
+    * Rende facoltativo ('?') il blocco emesso da body_from in poi.
+    * argomenti:
+    *   body_from: la prima istruzione del blocco
+    * return: 1 se fatto, 0 se il programma non ha piu' spazio
+    */
+    if prog_len + 2 > RE_PROG_MAX:
+        return 0
+
+    k = prog_len
+    while k > body_from:
+        prog_op[k] = prog_op[k - 1]
+        prog_a[k] = prog_a[k - 1]
+        prog_b[k] = prog_b[k - 1]
+        prog_c[k] = prog_c[k - 1]
+        k--
+    prog_len = prog_len + 1
+
+    k = body_from + 1
+    while k < prog_len:
+        if prog_op[k] == OP_JUMP:
+            if prog_a[k] > body_from:
+                prog_a[k] = prog_a[k] + 1
+        k++
+
+    prog_op[prog_len] = OP_JUMP
+    prog_a[prog_len] = prog_len + 1
+    prog_b[prog_len] = 0
+    prog_c[prog_len] = 0
+    prog_len = prog_len + 1
+
+    prog_op[body_from] = OP_BRANCH
+    prog_a[body_from] = 0
+    prog_b[body_from] = prog_len - body_from
+    prog_c[body_from] = 0
+    return 1
+
+
+def emit_star_loop(body_from: int) -> int:
+    /*
+    * Avvolge il blocco emesso da body_from in poi in un ciclo '*', zero o
+    * piu' ripetizioni, greedy. Il blocco non deve poter combaciare con il
+    * vuoto.
+    * argomenti:
+    *   body_from: la prima istruzione del blocco
+    * return: 1 se fatto, 0 se il programma non ha piu' spazio
+    */
+    if prog_len + 2 > RE_PROG_MAX:
+        return 0
+
+    k = prog_len
+    while k > body_from:
+        prog_op[k] = prog_op[k - 1]
+        prog_a[k] = prog_a[k - 1]
+        prog_b[k] = prog_b[k - 1]
+        prog_c[k] = prog_c[k - 1]
+        k--
+    prog_len = prog_len + 1
+
+    k = body_from + 1
+    while k < prog_len:
+        if prog_op[k] == OP_JUMP:
+            if prog_a[k] > body_from:
+                prog_a[k] = prog_a[k] + 1
+        k++
+
+    prog_op[prog_len] = OP_JUMP
+    prog_a[prog_len] = body_from
+    prog_b[prog_len] = 0
+    prog_c[prog_len] = 0
+    prog_len = prog_len + 1
+
+    prog_op[body_from] = OP_BRANCH
+    prog_a[body_from] = 0
+    prog_b[body_from] = prog_len - body_from
+    prog_c[body_from] = 0
+    return 1
+
+
+def unroll_group(head: int, rmin: int, rmax: int) -> int:
+    /*
+    * Ripete con un conteggio ({m,n}) il blocco emesso da head in poi,
+    * copiandolo.
+    * argomenti:
+    *   head: la prima istruzione del blocco
+    *   rmin: le ripetizioni minime
+    *   rmax: le ripetizioni massime, -1 per nessun limite
+    * return: 1 se fatto, 0 se il programma non ha piu' spazio o il conteggio
+    *   non ha senso
+    */
+    if rmin < 0:
+        return 0
+    if rmax >= 0:
+        if rmax < rmin:
+            return 0
+        if rmax == 0:
+            return 0
+
+    blk_to = prog_len
+
+    if rmin == 0:
+        if rmax < 0:
+            return emit_star_loop(head)
+        if emit_opt_group(head) == 0:
+            return 0
+        blk_to = prog_len
+        cp = 1
+        while cp < rmax:
+            if copy_block(head, blk_to) == 0:
+                return 0
+            cp++
+        return 1
+
+    cp = 1
+    while cp < rmin:
+        if copy_block(head, blk_to) == 0:
+            return 0
+        cp++
+
+    if rmax < 0:
+        h = prog_len
+        if copy_block(head, blk_to) == 0:
+            return 0
+        return emit_star_loop(h)
+
+    while cp < rmax:
+        h = prog_len
+        if copy_block(head, blk_to) == 0:
+            return 0
+        if emit_opt_group(h) == 0:
+            return 0
+        cp++
+    return 1
+
+
+def compile_range(pattern: str, start: int, stop: int) -> int:
+    /*
+    * Compila una parte del pattern, aggiungendo istruzioni in fondo al
+    * programma.
+    * argomenti:
+    *   pattern: il pattern
+    *   start, stop: la parte, stop escluso
+    * return: 1 se compilata, 0 su un costrutto non gestito
+    */
+    i = start
+    while i < stop:
+        if prog_len >= RE_PROG_MAX - 2:
+            return 0
+
+        if pattern[i] == '|':
+            return 0
+
+        if pattern[i] == '(':
+            if grp_depth >= GRP_STACK_MAX:
+                return 0
+
+            kind = 0
+            if pattern[i + 1] == '?':
+                if pattern[i + 2] == ':':
+                    kind = 1
+                else:
+                    if pattern[i + 2] == '=':
+                        kind = 2
+                    else:
+                        if pattern[i + 2] == '!':
+                            kind = 3
+                        else:
+                            return 0
+
+            close_at = find_close_paren(pattern, i, stop)
+            if close_at == -1:
+                return 0
+
+            body_from = i + 1
+            if kind != 0:
+                body_from = i + 3
+
+            if find_alt_in_range(pattern, body_from, close_at) != -1:
+                if kind >= 2:
+                    return 0
+
+                grp_head = prog_len
+
+                gnum2 = 0
+                if kind == 0:
+                    capture_group_count = capture_group_count + 1
+                    if capture_group_count > CAPTURE_MAX:
+                        return 0
+                    gnum2 = capture_group_count
+
+                    prog_op[prog_len] = OP_MARK
+                    prog_a[prog_len] = gnum2
+                    prog_b[prog_len] = 0
+                    prog_c[prog_len] = 0
+                    prog_len = prog_len + 1
+
+                alt_from = prog_len
+                prev_branch = 0 - 1
+                seg = body_from
+
+                while 1:
+                    rr = find_alt_in_range(pattern, seg, close_at)
+                    seg_stop = close_at
+                    if rr != -1:
+                        seg_stop = rr
+
+                    if prev_branch != -1:
+                        prog_b[prev_branch] = prog_len - prev_branch
+                    prev_branch = prog_len
+
+                    prog_op[prog_len] = OP_BRANCH
+                    prog_a[prog_len] = 0
+                    prog_b[prog_len] = 0
+                    prog_c[prog_len] = 0
+                    prog_len = prog_len + 1
+
+                    if compile_range(pattern, seg, seg_stop) == 0:
+                        return 0
+
+                    prog_op[prog_len] = OP_JUMP
+                    prog_a[prog_len] = 0
+                    prog_b[prog_len] = 0
+                    prog_c[prog_len] = 0
+                    prog_len = prog_len + 1
+
+                    if rr == -1:
+                        break
+                    seg = rr + 1
+
+                end_pos = prog_len
+
+                kk = alt_from
+                while kk < prog_len:
+                    if prog_op[kk] == OP_JUMP:
+                        if prog_a[kk] == 0:
+                            prog_a[kk] = end_pos
+                    kk++
+
+                if kind == 0:
+                    prog_op[prog_len] = OP_MARK
+                    prog_a[prog_len] = gnum2
+                    prog_b[prog_len] = 1
+                    prog_c[prog_len] = 0
+                    prog_len = prog_len + 1
+
+                i = close_at + 1
+
+                if pattern[i] == '*':
+                    vuoto = 0
+                    sg = body_from
+                    while 1:
+                        aa = find_alt_in_range(pattern, sg, close_at)
+                        sg_stop = close_at
+                        if aa != -1:
+                            sg_stop = aa
+                        if seq_consumes_one(pattern, sg, sg_stop) == 0:
+                            vuoto = 1
+                        if aa == -1:
+                            break
+                        sg = aa + 1
+
+                    if vuoto == 1:
+                        return 0
+                    if emit_star_loop(grp_head) == 0:
+                        return 0
+                    i++
+                    continue
+
+                if pattern[i] == '?':
+                    if emit_opt_group(grp_head) == 0:
+                        return 0
+                    i++
+                    continue
+
+                alt_min = 1
+                alt_max = 0 - 1
+                if pattern[i] == '+':
+                    i++
+                else:
+                    if pattern[i] != '{':
+                        continue
+                    j = i + 1
+                    m = 0
+                    visto = 0
+                    while isnumeric(pattern[j]):
+                        m = m * 10 + char_to_digit(pattern[j])
+                        visto = 1
+                        j++
+                    if visto == 0:
+                        return 0
+                    n = m
+                    if pattern[j] == ',':
+                        j++
+                        if pattern[j] == '}':
+                            n = 0 - 1
+                        else:
+                            n = 0
+                            while isnumeric(pattern[j]):
+                                n = n * 10 + char_to_digit(pattern[j])
+                                j++
+                    if pattern[j] != '}':
+                        return 0
+                    alt_min = m
+                    alt_max = n
+                    i = j + 1
+
+                if alt_max < 0:
+                    vuoto2 = 0
+                    sg2 = body_from
+                    while 1:
+                        a2 = find_alt_in_range(pattern, sg2, close_at)
+                        sg2_stop = close_at
+                        if a2 != -1:
+                            sg2_stop = a2
+                        if seq_consumes_one(pattern, sg2, sg2_stop) == 0:
+                            vuoto2 = 1
+                        if a2 == -1:
+                            break
+                        sg2 = a2 + 1
+                    if vuoto2 == 1:
+                        return 0
+
+                if unroll_group(grp_head, alt_min, alt_max) == 0:
+                    return 0
+                continue
+
+            grp_start[grp_depth] = prog_len
+            grp_kind[grp_depth] = kind
+            grp_src[grp_depth] = i
+
+            if kind == 0:
+                capture_group_count = capture_group_count + 1
+                if capture_group_count > CAPTURE_MAX:
+                    return 0
+                grp_stack[grp_depth] = capture_group_count
+
+                prog_op[prog_len] = OP_MARK
+                prog_a[prog_len] = capture_group_count
+                prog_b[prog_len] = 0
+                prog_c[prog_len] = 0
+                prog_len = prog_len + 1
+                i = i + 1
+            else:
+                grp_stack[grp_depth] = 0
+                if kind == 1:
+                    i = i + 3
+                else:
+                    neg = 0
+                    if kind == 3:
+                        neg = 1
+                    prog_op[prog_len] = OP_ASSERT
+                    prog_a[prog_len] = neg
+                    prog_b[prog_len] = 0
+                    prog_c[prog_len] = 0
+                    prog_len = prog_len + 1
+                    i = i + 3
+
+            grp_depth = grp_depth + 1
+            continue
+
+        if pattern[i] == ')':
+            if grp_depth == 0:
+                return 0
+
+            grp_depth = grp_depth - 1
+            gnum = grp_stack[grp_depth]
+            gstart = grp_start[grp_depth]
+            gkind = grp_kind[grp_depth]
+
+            if gkind >= 2:
+                prog_op[prog_len] = OP_MATCH
+                prog_a[prog_len] = 0
+                prog_b[prog_len] = 0
+                prog_c[prog_len] = 0
+                prog_len = prog_len + 1
+                i++
+
+                prog_b[gstart] = prog_len - gstart - 1
+
+                if pattern[i] == '*':
+                    return 0
+                if pattern[i] == '+':
+                    return 0
+                if pattern[i] == '?':
+                    return 0
+                if pattern[i] == '{':
+                    return 0
+                continue
+
+            if gkind == 0:
+                prog_op[prog_len] = OP_MARK
+                prog_a[prog_len] = gnum
+                prog_b[prog_len] = 1
+                prog_c[prog_len] = 0
+                prog_len = prog_len + 1
+            i++
+
+            gq = 0
+            if pattern[i] == '*':
+                gq = 1
+            if pattern[i] == '+':
+                gq = 1
+            if pattern[i] == '?':
+                gq = 1
+            if pattern[i] == '{':
+                gq = 1
+
+            if gq == 0:
+                continue
+
+            width = 0
+            fissa = 1
+            k = gstart
+            while k < prog_len:
+                o = prog_op[k]
+                if o == OP_MARK:
+                    width = width + 0
+                else:
+                    if o == OP_CHAR:
+                        width++
+                    else:
+                        if o == OP_ANY:
+                            width++
+                        else:
+                            if o == OP_CLASS:
+                                width++
+                            else:
+                                if o == OP_SHORT:
+                                    width++
+                                else:
+                                    fissa = 0
+                k++
+
+            if fissa == 0:
+                open_src = grp_src[grp_depth]
+                inner_from = open_src + 1
+                if pattern[open_src + 1] == '?':
+                    inner_from = open_src + 3
+                inner_to = i - 1
+
+                if pattern[i] == '?':
+                    if emit_opt_group(gstart) == 0:
+                        return 0
+                    i++
+                    continue
+
+                if pattern[i] == '*':
+                    if seq_consumes_one(pattern, inner_from, inner_to) == 0:
+                        return 0
+                    if emit_star_loop(gstart) == 0:
+                        return 0
+                    i++
+                    continue
+
+                unr_min = 1
+                unr_max = 0 - 1
+                if pattern[i] == '+':
+                    i++
+                else:
+                    if pattern[i] != '{':
+                        return 0
+                    j = i + 1
+                    m = 0
+                    visto = 0
+                    while isnumeric(pattern[j]):
+                        m = m * 10 + char_to_digit(pattern[j])
+                        visto = 1
+                        j++
+                    if visto == 0:
+                        return 0
+                    n = m
+                    if pattern[j] == ',':
+                        j++
+                        if pattern[j] == '}':
+                            n = 0 - 1
+                        else:
+                            n = 0
+                            while isnumeric(pattern[j]):
+                                n = n * 10 + char_to_digit(pattern[j])
+                                j++
+                    if pattern[j] != '}':
+                        return 0
+                    unr_min = m
+                    unr_max = n
+                    i = j + 1
+
+                if unr_max < 0:
+                    if seq_consumes_one(pattern, inner_from, inner_to) == 0:
+                        return 0
+
+                if unroll_group(gstart, unr_min, unr_max) == 0:
+                    return 0
+                continue
+
+            if width == 0:
+                return 0
+
+            body = prog_len - gstart
+
+            k = body
+            while k > 0:
+                prog_op[gstart + k] = prog_op[gstart + k - 1]
+                prog_a[gstart + k] = prog_a[gstart + k - 1]
+                prog_b[gstart + k] = prog_b[gstart + k - 1]
+                prog_c[gstart + k] = prog_c[gstart + k - 1]
+                k--
+            prog_len = prog_len + 1
+
+            gmin = 1
+            gmax = 1
+            if pattern[i] == '*':
+                gmin = 0
+                gmax = 0 - 1
+                i++
+            else:
+                if pattern[i] == '+':
+                    gmin = 1
+                    gmax = 0 - 1
+                    i++
+                else:
+                    if pattern[i] == '?':
+                        gmin = 0
+                        gmax = 1
+                        i++
+                    else:
+                        j = i + 1
+                        m = 0
+                        visto = 0
+                        while isnumeric(pattern[j]):
+                            m = m * 10 + char_to_digit(pattern[j])
+                            visto = 1
+                            j++
+                        if visto == 0:
+                            return 0
+                        n2 = m
+                        if pattern[j] == ',':
+                            j++
+                            if pattern[j] == '}':
+                                n2 = 0 - 1
+                            else:
+                                n2 = 0
+                                while isnumeric(pattern[j]):
+                                    n2 = n2 * 10 + char_to_digit(pattern[j])
+                                    j++
+                        if pattern[j] != '}':
+                            return 0
+                        gmin = m
+                        gmax = n2
+                        i = j + 1
+
+            prog_op[gstart] = OP_REPEAT
+            prog_a[gstart] = gmin
+            prog_b[gstart] = gmax
+            prog_c[gstart] = body
+            continue
+
+        if pattern[i] == '^':
+            prog_op[prog_len] = OP_BOL
+            prog_a[prog_len] = 0
+            prog_b[prog_len] = 0
+            prog_c[prog_len] = 0
+            prog_len = prog_len + 1
+            i++
+            continue
+
+        if pattern[i] == '$':
+            if pattern[i + 1] != '\0':
+                return 0
+            prog_op[prog_len] = OP_EOL
+            prog_a[prog_len] = 0
+            prog_b[prog_len] = 0
+            prog_len = prog_len + 1
+            i++
+            continue
+
+        pos_atom = prog_len
+        alen = atom_len(pattern + i)
+
+        if pattern[i] == '[':
+            prog_op[prog_len] = OP_CLASS
+            prog_a[prog_len] = i
+            prog_b[prog_len] = alen
+        else:
+            if pattern[i] == '.':
+                prog_op[prog_len] = OP_ANY
+                prog_a[prog_len] = 0
+                prog_b[prog_len] = 0
+            else:
+                if pattern[i] == '\\':
+                    if pattern[i + 1] == '\0':
+                        return 0
+                    if isnumeric(pattern[i + 1]):
+                        if pattern[i + 1] == '0':
+                            return 0
+                        prog_op[prog_len] = OP_GROUPREF
+                        prog_a[prog_len] = (
+                            char_to_digit(pattern[i + 1])
+                        )
+                        prog_b[prog_len] = 0
+                        prog_c[prog_len] = 0
+                        prog_len = prog_len + 1
+                        i = i + 2
+                        if pattern[i] == '*':
+                            return 0
+                        if pattern[i] == '+':
+                            return 0
+                        if pattern[i] == '?':
+                            return 0
+                        if pattern[i] == '{':
+                            return 0
+                        continue
+                    if is_shorthand_letter(pattern[i + 1]):
+                        prog_op[prog_len] = OP_SHORT
+                        prog_a[prog_len] = char_to_int(pattern[i + 1])
+                        prog_b[prog_len] = 0
+                    else:
+                        prog_op[prog_len] = OP_CHAR
+                        prog_a[prog_len] = char_to_int(
+                            escaped_literal_char(pattern[i + 1])
+                        )
+                        prog_b[prog_len] = 0
+                else:
+                    prog_op[prog_len] = OP_CHAR
+                    prog_a[prog_len] = char_to_int(pattern[i])
+                    prog_b[prog_len] = 0
+
+        prog_len = prog_len + 1
+        i = i + alen
+
+        min_r = 1
+        max_r = 1
+        has_quant = 0
+
+        if pattern[i] == '*':
+            min_r = 0
+            max_r = 0 - 1
+            has_quant = 1
+            i++
+        if pattern[i] == '+':
+            min_r = 1
+            max_r = 0 - 1
+            has_quant = 1
+            i++
+        if pattern[i] == '?':
+            min_r = 0
+            max_r = 1
+            has_quant = 1
+            i++
+        if pattern[i] == '{':
+            j = i + 1
+            m = 0
+            visto = 0
+            while isnumeric(pattern[j]):
+                m = m * 10 + char_to_digit(pattern[j])
+                visto = 1
+                j++
+            if visto == 0:
+                return 0
+
+            n = m
+            if pattern[j] == ',':
+                j++
+                if pattern[j] == '}':
+                    n = 0 - 1
+                else:
+                    n = 0
+                    while isnumeric(pattern[j]):
+                        n = n * 10 + char_to_digit(pattern[j])
+                        j++
+
+            if pattern[j] != '}':
+                return 0
+
+            min_r = m
+            max_r = n
+            has_quant = 1
+            i = j + 1
+
+        if has_quant == 1:
+            prog_op[prog_len] = prog_op[pos_atom]
+            prog_a[prog_len] = prog_a[pos_atom]
+            prog_b[prog_len] = prog_b[pos_atom]
+
+            prog_op[pos_atom] = OP_REPEAT
+            prog_a[pos_atom] = min_r
+            prog_b[pos_atom] = max_r
+            prog_c[pos_atom] = 1
+
+            prog_len = prog_len + 1
+    return 1
+
+
+def re_compile(pattern: str, want_eol: int) -> int:
+    /*
+    * Compila un pattern nel programma della VM; un pattern gia' compilato
+    * viene preso dalla cache.
+    * argomenti:
+    *   pattern: il pattern
+    *   want_eol: 1 per re_fullmatch, che chiede di arrivare a fine testo
+    * return: 1 se compilato, 0 se contiene un costrutto non gestito
+    */
+    if pattern == prog_src:
+        if want_eol == prog_eol:
+            return prog_ok
+
+    k = 0
+    while k < RE_CACHE_SIZE:
+        if re_cache_valid[k] == 1:
+            if re_cache_eol[k] == want_eol:
+                if re_cache_src[k] == pattern:
+                    prog_len = re_cache_len[k]
+                    prog_anchored = re_cache_anchored[k]
+                    capture_group_count = re_cache_grp[k]
+                    base = k * RE_PROG_MAX
+                    j = 0
+                    while j < prog_len:
+                        prog_op[j] = re_cache_op[base + j]
+                        prog_a[j] = re_cache_a[base + j]
+                        prog_b[j] = re_cache_b[base + j]
+                        prog_c[j] = re_cache_c[base + j]
+                        j++
+                    prog_src = re_cache_src[k]
+                    prog_eol = want_eol
+                    prog_ok = 1
+                    return 1
+        k++
+
+    prog_len = 0
+    prog_anchored = 0
+    prog_ok = 0
+
+    capture_group_count = 0
+    grp_depth = 0
+
+    i = 0
+    total = long_to_int(strlen(pattern))
+    rel = find_alt_in_range(pattern, 0, total)
+
+    if rel == -1:
+        if pattern[i] == '^':
+            prog_anchored = 1
+            i++
+
+    if rel == -1:
+        if compile_range(pattern, i, total) == 0:
+            return 0
+    else:
+        n_alt = 0
+        seg_start = i
+
+        while 1:
+            if n_alt >= ALT_MAX:
+                return 0
+
+            r = find_alt_in_range(pattern, seg_start, total)
+            seg_end = total
+            if r != -1:
+                seg_end = r
+
+            br_pos[n_alt] = prog_len
+            prog_op[prog_len] = OP_BRANCH
+            prog_a[prog_len] = 0
+            prog_b[prog_len] = 0
+            prog_c[prog_len] = 0
+            prog_len = prog_len + 1
+
+            if compile_range(pattern, seg_start, seg_end) == 0:
+                return 0
+
+            jp_pos[n_alt] = prog_len
+            prog_op[prog_len] = OP_JUMP
+            prog_a[prog_len] = 0
+            prog_b[prog_len] = 0
+            prog_c[prog_len] = 0
+            prog_len = prog_len + 1
+
+            n_alt = n_alt + 1
+
+            if r == -1:
+                break
+            seg_start = seg_end + 1
+
+        k = 0
+        while k < n_alt:
+            prog_a[jp_pos[k]] = prog_len
+            if k + 1 < n_alt:
+                prog_b[br_pos[k]] = br_pos[k + 1] - br_pos[k]
+            else:
+                prog_b[br_pos[k]] = 0
+            k++
+
+    if want_eol == 1:
+        prog_op[prog_len] = OP_EOL
+        prog_a[prog_len] = 0
+        prog_b[prog_len] = 0
+        prog_c[prog_len] = 0
+        prog_len = prog_len + 1
+
+    prog_op[prog_len] = OP_MATCH
+    prog_a[prog_len] = 0
+    prog_b[prog_len] = 0
+    prog_len = prog_len + 1
+
+    prog_ok = 1
+
+    slot = re_cache_next
+    if re_cache_valid[slot] == 1:
+        rt_free(re_cache_src[slot])
+    re_cache_src[slot] = "" + pattern
+    re_cache_eol[slot] = want_eol
+    re_cache_len[slot] = prog_len
+    re_cache_anchored[slot] = prog_anchored
+    re_cache_grp[slot] = capture_group_count
+    re_cache_valid[slot] = 1
+    base = slot * RE_PROG_MAX
+    j = 0
+    while j < prog_len:
+        re_cache_op[base + j] = prog_op[j]
+        re_cache_a[base + j] = prog_a[j]
+        re_cache_b[base + j] = prog_b[j]
+        re_cache_c[base + j] = prog_c[j]
+        j++
+
+    re_cache_next = slot + 1
+    if re_cache_next >= RE_CACHE_SIZE:
+        re_cache_next = 0
+
+    prog_src = re_cache_src[slot]
+    prog_eol = want_eol
+    return 1
+
+
+def vm_group_start(n: int) -> int:
+    /*
+    * Restituisce l'offset di inizio di un gruppo, senza controlli (per
+    * OP_GROUPREF).
+    * argomenti:
+    *   n: il gruppo, da 1 a CAPTURE_MAX
+    * return: l'offset
+    */
+    return capture_start[n]
+
+
+def vm_group_end(n: int) -> int:
+    /*
+    * Restituisce l'offset di fine di un gruppo, senza controlli.
+    * argomenti:
+    *   n: il gruppo, da 1 a CAPTURE_MAX
+    * return: l'offset
+    */
+    return capture_end[n]
+
+
+inline def vm_atom_at(pc: int, c: char, pattern: str) -> int:
+    /*
+    * Controlla se un carattere soddisfa l'atomo dell'istruzione pc.
+    * argomenti:
+    *   pc: l'istruzione
+    *   c: il carattere
+    *   pattern: il pattern compilato
+    * return: 1 se lo soddisfa, 0 altrimenti
+    */
+    op = prog_op[pc]
+
+    if op == OP_CHAR:
+        return (c as int) == prog_a[pc]
+
+    if op == OP_ANY:
+        return 1
+
+    if op == OP_CLASS:
+        return class_match(pattern + prog_a[pc], prog_b[pc], c)
+
+    if op == OP_SHORT:
+        return shorthand_class_match(int_to_char(prog_a[pc]), c)
+
+    return 0
+
+
+// profondita' massima della ricorsione di vm_run: oltre, il match
+// fallisce invece di esaurire lo stack
+VM_RUN_MAX_DEPTH = 300
+vm_run_depth = 0
+
+def vm_run(pc: int, t: str, pattern: str) -> int:
+    /*
+    * Esegue il programma compilato dall'istruzione pc sul testo, con
+    * backtracking. Oltre VM_RUN_MAX_DEPTH livelli di ricorsione il match
+    * fallisce.
+    * argomenti:
+    *   pc: l'istruzione da cui partire
+    *   t: la posizione nel testo
+    *   pattern: il pattern compilato
+    * return: 1 se combacia (vm_end e' dove finisce il match), 0 altrimenti
+    */
+    while 1:
+        op = prog_op[pc]
+
+        if op == OP_MATCH:
+            vm_end = t
+            return 1
+
+        if op == OP_EOL:
+            if t[0] == '\0':
+                pc++
+                continue
+            return 0
+
+        if op == OP_BOL:
+            if ptr_diff(t, capture_text_base) == 0:
+                pc++
+                continue
+            return 0
+
+        if op == OP_MARK:
+            if prog_b[pc] == 0:
+                record_group_start(prog_a[pc], t)
+            else:
+                record_group_end(prog_a[pc], t)
+            pc++
+            continue
+
+        if op == OP_BRANCH:
+            vm_run_depth = vm_run_depth + 1
+            if vm_run_depth > VM_RUN_MAX_DEPTH:
+                vm_run_depth = vm_run_depth - 1
+                return 0
+            r_branch = vm_run(pc + 1, t, pattern)
+            vm_run_depth = vm_run_depth - 1
+            if r_branch:
+                return 1
+            if prog_b[pc] == 0:
+                return 0
+            pc = pc + prog_b[pc]
+            continue
+
+        if op == OP_JUMP:
+            pc = prog_a[pc]
+            continue
+
+        if op == OP_ASSERT:
+            vm_run_depth = vm_run_depth + 1
+            if vm_run_depth > VM_RUN_MAX_DEPTH:
+                vm_run_depth = vm_run_depth - 1
+                return 0
+            r = vm_run(pc + 1, t, pattern)
+            vm_run_depth = vm_run_depth - 1
+            if prog_a[pc] == 0:
+                if r == 0:
+                    return 0
+            else:
+                if r == 1:
+                    return 0
+            pc = pc + 1 + prog_b[pc]
+            continue
+
+        if op == OP_GROUPREF:
+            n = prog_a[pc]
+            if is_group_valid(n) == 0:
+                return 0
+
+            gs = vm_group_start(n)
+            ge = vm_group_end(n)
+            glen = ge - gs
+            src = capture_text_base + gs
+
+            k = 0
+            while k < glen:
+                if t[k] == '\0':
+                    return 0
+                if t[k] != src[k]:
+                    return 0
+                k++
+
+            t = t + glen
+            pc++
+            continue
+
+        if op == OP_REPEAT:
+            min_r = prog_a[pc]
+            max_r = prog_b[pc]
+            blen = prog_c[pc]
+            cont = pc + 1 + blen
+
+            count = 0
+            tt = t
+            while 1:
+                if max_r >= 0:
+                    if count >= max_r:
+                        break
+
+                ok = 1
+                k = 0
+                cur = tt
+                while k < blen:
+                    o = prog_op[pc + 1 + k]
+                    if o == OP_MARK:
+                        k++
+                        continue
+                    if cur[0] == '\0':
+                        ok = 0
+                        break
+                    if vm_atom_at(pc + 1 + k, cur[0], pattern) == 0:
+                        ok = 0
+                        break
+                    cur = cur + 1
+                    k++
+
+                if ok == 0:
+                    break
+
+                k = 0
+                cur = tt
+                while k < blen:
+                    o = prog_op[pc + 1 + k]
+                    if o == OP_MARK:
+                        if prog_b[pc + 1 + k] == 0:
+                            record_group_start(prog_a[pc + 1 + k], cur)
+                        else:
+                            record_group_end(prog_a[pc + 1 + k], cur)
+                    else:
+                        cur = cur + 1
+                    k++
+
+                tt = cur
+                count++
+
+            if count < min_r:
+                return 0
+
+            iter_width = 0
+            k = 0
+            while k < blen:
+                if prog_op[pc + 1 + k] != OP_MARK:
+                    iter_width++
+                k++
+
+            while 1:
+                vm_run_depth = vm_run_depth + 1
+                if vm_run_depth > VM_RUN_MAX_DEPTH:
+                    vm_run_depth = vm_run_depth - 1
+                    return 0
+                r_backtrack = vm_run(cont, tt, pattern)
+                vm_run_depth = vm_run_depth - 1
+                if r_backtrack:
+                    return 1
+                if count <= min_r:
+                    return 0
+                tt = tt - iter_width
+                count--
+        if t[0] == '\0':
+            return 0
+        if vm_atom_at(pc, t[0], pattern) == 0:
+            return 0
+        t = t + 1
+        pc++
+
+
+def clear_if_failed(r: int) -> int:
+    /*
+    * Azzera le catture se una ricerca e' fallita: un tentativo abbandonato
+    * puo' averne lasciate.
+    * argomenti:
+    *   r: il risultato della ricerca
+    * return: r
+    */
+    if r == 0:
+        reset_captures()
+    return r
+
+
+def re_match(pattern: str, text: str) -> int:
+    /*
+    * Controlla se il pattern combacia all'inizio del testo, come re.match di
+    * Python: dopo il match il testo puo' continuare.
+    * argomenti:
+    *   pattern: il pattern
+    *   text: il testo
+    * return: 1 se combacia, 0 altrimenti
+    */
+    reset_captures()
+    vm_run_depth = 0
+    set_capture_text_base(text)
+
+    if re_compile(pattern, 0):
+        if vm_run(0, text, pattern):
+            record_group_start(0, text)
+            record_group_end(0, vm_end)
+            return 1
+        return clear_if_failed(0)
+
+    return re_unsupported(pattern)
+
+
+def re_fullmatch(pattern: str, text: str) -> int:
+    /*
+    * Controlla se il pattern combacia con tutto il testo, come re.fullmatch
+    * di Python.
+    * argomenti:
+    *   pattern: il pattern
+    *   text: il testo
+    * return: 1 se combacia, 0 altrimenti
+    */
+    reset_captures()
+    vm_run_depth = 0
+    set_capture_text_base(text)
+
+    if re_compile(pattern, 1):
+        if vm_run(0, text, pattern):
+            record_group_start(0, text)
+            record_group_end(0, vm_end)
+            return 1
+        return clear_if_failed(0)
+
+    return re_unsupported(pattern)
+
+
+def build_class_lut(pattern: str, pc: int) -> int:
+    /*
+    * Riempie class_lut con i byte che soddisfano la classe dell'istruzione
+    * pc, per il percorso veloce di re_search; il byte 0 non vale mai.
+    * argomenti:
+    *   pattern: il pattern compilato
+    *   pc: un'istruzione OP_CLASS o OP_SHORT
+    * return: 0
+    */
+    if prog_src == class_lut_src:
+        if pc == class_lut_pc:
+            return 0
+
+    b = 0
+    while b < 256:
+        class_lut[b] = vm_atom_at(pc, int_to_char(b), pattern)
+        b++
+    class_lut[0] = 0
+
+    class_lut_src = prog_src
+    class_lut_pc = pc
+    return 0
+
+
+def re_search(pattern: str, text: str) -> int:
+    /*
+    * Controlla se il pattern combacia in qualche punto del testo, come
+    * re.search di Python; con un '^' iniziale, solo all'inizio.
+    * argomenti:
+    *   pattern: il pattern
+    *   text: il testo
+    * return: 1 se combacia, 0 altrimenti
+    */
+    reset_captures()
+    vm_run_depth = 0
+    set_capture_text_base(text)
+
+    if re_compile(pattern, 0) == 0:
+        return re_unsupported(pattern)
+
+    first_pc = 0
+    if prog_op[0] == OP_REPEAT:
+        if prog_a[0] >= 1:
+            first_pc = 1
+
+    if prog_anchored == 0:
+        if prog_op[first_pc] == OP_CHAR:
+            bersaglio = int_to_char(prog_a[first_pc])
+            t = text
+            while 1:
+                skip = find_char(t, bersaglio)
+                if skip == -1:
+                    return clear_if_failed(0)
+                t = t + skip
+                if vm_run(0, t, pattern):
+                    record_group_start(0, t)
+                    record_group_end(0, vm_end)
+                    return 1
+                t = t + 1
+
+        if prog_op[first_pc] == OP_CLASS or prog_op[first_pc] == OP_SHORT:
+            build_class_lut(pattern, first_pc)
+            t = text
+            while 1:
+                while class_lut[t[0] as int] == 0:
+                    if t[0] == '\0':
+                        return clear_if_failed(0)
+                    t = t + 1
+                if vm_run(0, t, pattern):
+                    record_group_start(0, t)
+                    record_group_end(0, vm_end)
+                    return 1
+                t = t + 1
+
+    t = text
+    while 1:
+        if vm_run(0, t, pattern):
+            record_group_start(0, t)
+            record_group_end(0, vm_end)
+            return 1
+        if prog_anchored:
+            return clear_if_failed(0)
+        if t[0] == '\0':
+            return clear_if_failed(0)
+        t = t + 1
+    return clear_if_failed(0)
+
+
+def re_finditer_next(pattern: str, text: str) -> str:
+    /*
+    * Cerca il prossimo match nel testo, come un passo di re.finditer di
+    * Python. Per scorrerli tutti si riparte ogni volta da match_rest():
+    *     rest = text
+    *     while 1:
+    *         m = re_finditer_next(pattern, rest)
+    *         if is_group_valid(0) == 0:
+    *             break
+    *         rest = match_rest()
+    *         if strlen(m) == 0:
+    *             if rest[0] == '\0':
+    *                 break
+    *             rest = rest + 1
+    * Un match vuoto e' valido: se c'e' stato un match lo dice
+    * is_group_valid(0), non il testo restituito.
+    * argomenti:
+    *   pattern: il pattern
+    *   text: il testo, o il resto da cui continuare
+    * return: il testo del match, "" se non c'e' (o se il match e' vuoto)
+    */
+    if re_search(pattern, text) == 0:
+        return ""
+    return group(0)
+
+
+class ReMatch:
+    /*
+    * Un risultato di re_findall().
+    * campi:
+    *   testo: l'intero match
+    *   gruppi: una List di str, una per gruppo (l'indice 0 e' group(1)),
+    *     "" per un gruppo che non ha partecipato; si legge con
+    *     'g = m.gruppi as List' e 'list_get(g, i) as str'
+    */
+    testo str
+    gruppi ref
+
+
+def re_groups() -> List:
+    /*
+    * Restituisce i gruppi dell'ultimo match in una List di str: l'indice 0
+    * e' group(1). Un gruppo che non ha partecipato vale "".
+    * return: la List, lunga quanto i gruppi del pattern
+    */
+    gruppi = list_new()
+    n = 1
+    while n <= capture_group_count:
+        if is_group_valid(n):
+            testo_n = group(n)
+            list_push(gruppi, testo_n)
+        else:
+            list_push(gruppi, "")
+        n++
+    return gruppi
+
+
+def re_findall(pattern: str, text: str) -> List:
+    /*
+    * Restituisce tutte le occorrenze non sovrapposte del pattern, come
+    * re.findall di Python: una List di ReMatch, con il testo e i gruppi di
+    * ogni match.
+    * argomenti:
+    *   pattern: il pattern
+    *   text: il testo
+    * return: la List, vuota se il pattern non compare
+    */
+    risultati = list_new()
+    rest = text
+
+    while 1:
+        m = re_finditer_next(pattern, rest)
+        if is_group_valid(0) == 0:
+            break
+
+        info = new ReMatch()
+        info.testo = m
+        info.gruppi = re_groups()
+
+        list_push(risultati, info)
+
+        rest = match_rest()
+        if strlen(m) == 0:
+            if rest[0] == '\0':
+                break
+            rest = rest + 1
+
+    return risultati
+
+
+def re_count_matches(pattern: str, text: str) -> int:
+    /*
+    * Conta le occorrenze non sovrapposte del pattern, come
+    * len(re.findall(pattern, text)) di Python.
+    * argomenti:
+    *   pattern: il pattern
+    *   text: il testo
+    * return: il numero di occorrenze
+    */
+    rest = text
+    count = 0
+    while 1:
+        m = re_finditer_next(pattern, rest)
+        if is_group_valid(0) == 0:
+            break
+        count = count + 1
+        rest = match_rest()
+        if strlen(m) == 0:
+            if rest[0] == '\0':
+                break
+            rest = rest + 1
+    return count
+
+
+def backref_group_num(repl: str, i: int) -> int:
+    /*
+    * Se in repl alla posizione i c'e' un riferimento '\1'-'\9', ne
+    * restituisce il numero di gruppo.
+    * argomenti:
+    *   repl: il testo di sostituzione
+    *   i: la posizione
+    * return: il numero del gruppo, -1 se non c'e' un riferimento
+    */
+    if repl[i] != '\\':
+        return -1
+    if repl[i + 1] == '\0':
+        return -1
+    if isnumeric(repl[i + 1]) == 0:
+        return -1
+    n = (repl[i + 1] as int) - ('0' as int)
+    if n < 1:
+        return -1
+    return n
+
+
+def repl_expanded_len(repl: str) -> int:
+    /*
+    * Restituisce la lunghezza di repl dopo aver espanso i riferimenti ai
+    * gruppi dell'ultimo match, senza costruire il testo.
+    * argomenti:
+    *   repl: il testo di sostituzione
+    * return: la lunghezza
+    */
+    total = 0
+    i = 0
+    while repl[i] != '\0':
+        n = backref_group_num(repl, i)
+        if n == -1:
+            if repl[i] == '\\':
+                if repl[i + 1] == '\0':
+                    total = total + 1
+                    i++
+                else:
+                    total = total + 1
+                    i = i + 2
+            else:
+                total = total + 1
+                i++
+        else:
+            if is_group_valid(n):
+                total = total + (capture_end[n] - capture_start[n])
+            i = i + 2
+    return total
+
+
+def apply_repl_backrefs(repl: str) -> str:
+    /*
+    * Espande in repl i riferimenti '\1'-'\9' con i gruppi dell'ultimo
+    * match, come nella sostituzione di re.sub di Python. '\\' e' un
+    * backslash; un riferimento a un gruppo che non ha catturato vale "".
+    * argomenti:
+    *   repl: il testo di sostituzione
+    * return: il testo espanso
+    */
+    lunghezza = repl_expanded_len(repl)
+    buf = rt_alloc_up(lunghezza + 1)
+    pos = 0
+    i = 0
+    while repl[i] != '\0':
+        n = backref_group_num(repl, i)
+        if n == -1:
+            if repl[i] == '\\':
+                if repl[i + 1] == '\0':
+                    buf[pos] = '\\'
+                    pos++
+                    i++
+                else:
+                    buf[pos] = repl[i + 1]
+                    pos++
+                    i = i + 2
+            else:
+                buf[pos] = repl[i]
+                pos++
+                i++
+        else:
+            if is_group_valid(n):
+                start = capture_text_base + capture_start[n]
+                glen = capture_end[n] - capture_start[n]
+                k = 0
+                while k < glen:
+                    buf[pos] = start[k]
+                    pos++
+                    k++
+            i = i + 2
+    buf[pos] = '\0'
+    return buf
+
+
+def re_sub(pattern: str, repl: str, text: str) -> str:
+    /*
+    * Sostituisce ogni occorrenza non sovrapposta del pattern con repl, come
+    * re.sub di Python. repl puo' citare i gruppi di ogni occorrenza con
+    * '\1'-'\9': re_sub("(\w+)@(\w+)", "\2@\1", t) scambia i due lati.
+    * argomenti:
+    *   pattern: il pattern
+    *   repl: il testo di sostituzione
+    *   text: il testo
+    * return: il testo nuovo
+    */
+    pezzi = list_new()
+    totale = 0 as long
+
+    rest = text
+    while 1:
+        m = re_finditer_next(pattern, rest)
+        if is_group_valid(0) == 0:
+            break
+
+        prefix_len = ptr_diff(match_start(), rest)
+        prefix = substrget(rest, prefix_len)
+        list_push(pezzi, prefix)
+        totale = totale + prefix_len
+
+        sostituto = apply_repl_backrefs(repl)
+        list_push(pezzi, sostituto)
+        totale = totale + strlen(sostituto)
+
+        rest = match_rest()
+        if strlen(m) == 0:
+            if rest[0] == '\0':
+                break
+            pezzo_singolo = substrget(rest, 1)
+            list_push(pezzi, pezzo_singolo)
+            totale = totale + 1
+            rest = rest + 1
+
+    totale = totale + strlen(rest)
+
+    buf = rt_alloc_up(totale + 1)
+    pos = 0 as long
+    idx_pezzo = 0 as long
+    n_pezzi = list_length(pezzi)
+    while idx_pezzo < n_pezzi:
+        pezzo = list_get(pezzi, idx_pezzo) as str
+        n = strlen(pezzo)
+        k = 0 as long
+        while k < n:
+            buf[pos] = pezzo[k]
+            pos++
+            k++
+        idx_pezzo++
+
+    k2 = 0 as long
+    n2 = strlen(rest)
+    while k2 < n2:
+        buf[pos] = rest[k2]
+        pos++
+        k2++
+    buf[pos] = '\0'
+
+    return buf

@@ -1,0 +1,142 @@
+/*
+* Windows x64: i wrapper verso le funzioni del runtime per dict e
+* sdict (vedi wrapper/linux/dict.tryc). I parametri arrivano nei registri
+* degli asminline (rdi, rsi, rdx) e il runtime li vuole in quelli di Win64
+* (rcx, rdx, r8), con lo stack allineato a 16 e 32 byte riservati per lui.
+* rbx tiene lo stack di prima: lo conserva anche il runtime.
+*/
+
+
+def dict_probe_get(d: str, key: str, key_hash: int) -> str:
+    /*
+    * Cerca una chiave nella tabella di un dict (rt_dict_probe_get).
+    * argomenti:
+    *   d: la tabella
+    *   key: la chiave
+    *   key_hash: dict_hash(key)
+    * return: lo slot della chiave, 0 se non c'e'
+    */
+    asminline(
+        push rbx
+        mov rbx, rsp
+        and rsp, -16
+        sub rsp, 32
+        mov r8, rdx
+        mov rdx, rsi
+        mov rcx, rdi
+        call rt_dict_probe_get
+        mov rsp, rbx
+        pop rbx
+    )endasm
+
+
+def dict_probe_set(d: str, key: str, key_hash: int) -> str:
+    /*
+    * Trova lo slot di una chiave nella tabella di un dict, o ne occupa uno
+    * libero con chiave e hash (rt_dict_probe_set).
+    * argomenti:
+    *   d: la tabella
+    *   key: la chiave
+    *   key_hash: dict_hash(key)
+    * return: lo slot, 0 se la tabella e' piena
+    */
+    asminline(
+        push rbx
+        mov rbx, rsp
+        and rsp, -16
+        sub rsp, 32
+        mov r8, rdx
+        mov rdx, rsi
+        mov rcx, rdi
+        call rt_dict_probe_set
+        mov rsp, rbx
+        pop rbx
+    )endasm
+
+
+def dict_hash(key: str) -> int:
+    /*
+    * Calcola l'hash di una stringa per i dict (rt_str_hash).
+    * argomenti:
+    *   key: la stringa
+    * return: l'hash, a 31 bit e quindi mai negativo
+    */
+    asminline (
+        push rbx
+        mov rbx, rsp
+        and rsp, -16
+        sub rsp, 32
+        mov rcx, rdi
+        call rt_str_hash
+        mov rsp, rbx
+        pop rbx
+    ) endasm
+
+
+def sdict_probe_get(d: str, key: str, key_hash: int) -> str:
+    /*
+    * Cerca una chiave nella tabella di un sdict (rt_sdict_probe_get).
+    * argomenti:
+    *   d: la tabella
+    *   key: la chiave
+    *   key_hash: dict_hash(key)
+    * return: lo slot della chiave, 0 se non c'e'
+    */
+    asminline(
+        push rbx
+        mov rbx, rsp
+        and rsp, -16
+        sub rsp, 32
+        mov r8, rdx
+        mov rdx, rsi
+        mov rcx, rdi
+        call rt_sdict_probe_get
+        mov rsp, rbx
+        pop rbx
+    )endasm
+
+
+def sdict_probe_set(d: str, key: str, key_hash: int) -> str:
+    /*
+    * Trova lo slot di una chiave nella tabella di un sdict, o ne occupa uno
+    * libero con chiave e hash (rt_sdict_probe_set).
+    * argomenti:
+    *   d: la tabella
+    *   key: la chiave
+    *   key_hash: dict_hash(key)
+    * return: lo slot, 0 se la tabella e' piena
+    */
+    asminline(
+        push rbx
+        mov rbx, rsp
+        and rsp, -16
+        sub rsp, 32
+        mov r8, rdx
+        mov rdx, rsi
+        mov rcx, rdi
+        call rt_sdict_probe_set
+        mov rsp, rbx
+        pop rbx
+    )endasm
+
+
+def sdict_find(d: str, key: str) -> str:
+    /*
+    * Cerca una chiave nella tabella di un sdict, calcolandone anche l'hash
+    * (rt_sdict_find).
+    * argomenti:
+    *   d: la tabella
+    *   key: la chiave
+    * return: lo slot della chiave, 0 se non c'e'
+    */
+    asminline(
+        push rbx
+        mov rbx, rsp
+        and rsp, -16
+        sub rsp, 32
+        mov rdx, rsi
+        mov rcx, rdi
+        call rt_sdict_find
+        mov rsp, rbx
+        pop rbx
+    )endasm

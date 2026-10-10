@@ -1,0 +1,596 @@
+
+/*
+* Linux: le syscall di rete (socket, opzioni, epoll) per libstd/net.
+*/
+
+#ifdef __aarch64__
+#define SYS_EPOLL_CREATE1 20
+#define SYS_EPOLL_CTL 21
+#define SYS_EPOLL_PWAIT 22
+#define SYS_FCNTL 25
+#define SYS_ACCEPT4 242
+
+#define SYS_SOCKET 198
+#define SYS_CONNECT 203
+#define SYS_ACCEPT 202
+#define SYS_BIND 200
+#define SYS_LISTEN 201
+#define SYS_GETSOCKNAME 204
+#define SYS_GETPEERNAME 205
+#define SYS_SOCKETPAIR 199
+#define SYS_SETSOCKOPT 208
+#define SYS_GETSOCKOPT 209
+
+#else
+
+#define SYS_SOCKET 41
+#define SYS_CONNECT 42
+#define SYS_ACCEPT 43
+
+#define SYS_BIND 49
+#define SYS_LISTEN 50
+#define SYS_GETSOCKNAME 51
+#define SYS_GETPEERNAME 52
+#define SYS_SOCKETPAIR 53
+#define SYS_SETSOCKOPT 54
+#define SYS_GETSOCKOPT 55
+
+#define SYS_FCNTL 72
+#define SYS_ACCEPT4 288
+
+#define SYS_EPOLL_CTL 233
+#define SYS_EPOLL_PWAIT 281
+#define SYS_EPOLL_CREATE1 291
+
+#endif
+
+/*
+* struct linger: se close deve aspettare che i dati gia' scritti partano.
+* campi:
+*   l_onoff: 0 spento, 1 acceso
+*   l_linger: quanti secondi aspettare
+* Su Windows ha un altro layout: set_linger e get_linger la usano allo
+* stesso modo sui due sistemi.
+*/
+
+class Linger --no-padding:
+    l_onoff int
+    l_linger int
+
+
+#ifndef SO_LINGER
+// quanto close aspetta i dati non ancora spediti (vedi set_linger)
+#define SO_LINGER 13
+#endif
+
+
+#ifndef SOCKET
+// un socket e' un fd, come un file (anche su Windows, vedi
+// wrapper/windows/sysnet): usato per rendere il codice FE della libreria
+// cross-platform.
+#define SOCKET int
+#endif
+
+
+/* ==== opzioni di setsockopt: i numeri di Linux ==== */
+
+#ifndef SO_REUSEPORT
+/*
+usabile processi/thread per accettare connessioni sullo stesso porta,
+aumenta il parallelismo.
+*/
+#define SO_REUSEPORT 15
+#endif
+
+
+#ifndef SOL_SOCKET1
+/*
+* Opzioni generali del socket
+*/
+#define SOL_SOCKET1 1
+#endif
+
+
+#ifndef TCP_MAXSEG
+/*
+* Imposta o legge il valore MSS (Maximum Segment Size),
+* ovvero la dimensione massima in byte del payload TCP di un singolo pacchetto.
+* Di solito viene negoziato in automatico,
+* ma puoi forzarlo al ribasso per evitare problemi di frammentazione IP su reti particolari.
+*/
+#define TCP_MAXSEG 2
+#endif
+
+
+#ifndef TCP_CORK
+/*
+* Dice al kernel di non accumulare piccoli pacchetti, ma di aspettare finché il buffer non è stracolmo
+* (al limite della dimensione MSS).
+* Se unisci più scritture piccole,
+* viaggeranno in un unico blocco gigante ottimizzando la banda di rete.
+*/
+#define TCP_CORK 3
+#endif
+
+
+#ifndef TCP_KEEPIDLE
+/*
+* Specifica il tempo di inattività (in secondi) prima che il kernel inizi a inviare i primi pacchetti
+* "esplorativi" per verificare se l'altro computer è ancora vivo.
+* Il default di Linux è molto alto (7200 secondi / 2 ore).
+*/
+#define TCP_KEEPIDLE 4
+#endif
+
+#ifndef TCP_KEEPINTVL
+/*
+* Specifica l'intervallo di tempo (in secondi) tra un pacchetto di controllo e il successivo,
+* nel caso in cui l'altro capo non stia rispondendo.
+*/
+#define TCP_KEEPINTVL 5
+#endif
+
+#ifndef TCP_KEEPCNT
+/*
+* Specifica il numero massimo di pacchetti di Keep-Alive consecutivi che possono andare persi
+* prima che il kernel dichiari la connessione ufficialmente "morta" e chiuda il socket restituendo un errore.
+*/
+#define TCP_KEEPCNT 6
+#endif
+
+#ifndef TCP_QUICKACK
+/*
+* Forza il kernel a inviare immediatamente i pacchetti di conferma (ACK) di ricezione dei dati.
+* Normalmente Linux ritarda leggermente gli ACK sperando di poterli accorpare ai dati di risposta del tuo programma.
+* Utile se vuoi massimizzare la reattività di ricezione.
+*/
+#define TCP_QUICKACK 12
+#endif
+
+
+#ifndef TCP_USER_TIMEOUT
+/*
+* Specifica il tempo massimo (in millisecondi) in cui i dati trasmessi possono rimanere non confermati (senza ACK) prima che il kernel forzi la chiusura della connessione.
+* E' molto utile per rilevare cavi di rete staccati o crash improvvisi del server in pochissimi secondi.
+*/
+#define TCP_USER_TIMEOUT 18
+#endif
+
+
+#ifndef TCP_DEFER_ACCEPT
+/*
+* Ottimizzazione per i server web.
+* Dice al kernel di non svegliare il processo tramite la syscall accept() quando un client si connette,
+* ma di aspettare finché il client non invia anche il primo pacchetto reale di dati
+* (es. la richiesta HTTP GET). Riduce i cambi di contesto inutili.
+*/
+#define TCP_DEFER_ACCEPT 9
+#endif
+
+#ifndef SO_RCVTIMEO
+/*
+* Timeout di ricezione: quanto una recv() puo' bloccarsi prima di fallire
+* con EAGAIN. Il valore e' una struct timeval (due long: secondi e
+* microsecondi), vedi set_recv_timeout.
+*/
+#define SO_RCVTIMEO 20
+#endif
+
+
+def sys_epoll_create1(flags: int) -> int:
+    /*
+    * Crea un'istanza epoll (syscall epoll_create1).
+    * argomenti:
+    *   flags: 0 per il comportamento normale
+    * return: il fd dell'istanza, negativo in caso di errore
+    */
+#ifdef __aarch64__
+    asminline(
+        mov x8, SYS_EPOLL_CREATE1
+        svc #0
+    ) endasm
+#else
+    asminline(
+        mov rax, SYS_EPOLL_CREATE1
+        syscall
+    ) endasm
+#endif
+
+
+def sys_fcntl(fd: SOCKET, cmd: int, flags: int) -> int:
+    /*
+    * Legge o cambia le proprieta' di un fd (syscall fcntl), es. F_GETFL e
+    * F_SETFL per O_NONBLOCK.
+    * argomenti:
+    *   fd: il file descriptor
+    *   cmd: l'operazione
+    *   flags: il suo argomento
+    * return: dipende da cmd; negativo in caso di errore
+    */
+#ifdef __aarch64__
+    asminline(
+        mov x8, SYS_FCNTL
+        svc #0
+    ) endasm
+#else
+    asminline(
+        mov rax, SYS_FCNTL
+        syscall
+    ) endasm
+#endif
+
+
+def sys_epoll_ctl(epfd: int, op: int, fd: SOCKET, event: str) -> int:
+    /*
+    * Aggiunge, modifica o toglie un fd da un'istanza epoll (syscall
+    * epoll_ctl).
+    * argomenti:
+    *   epfd: l'istanza epoll
+    *   op: EPOLL_CTL_ADD (1), EPOLL_CTL_DEL (2) o EPOLL_CTL_MOD (3)
+    *   fd: il file descriptor
+    *   event: la struct epoll_event, con events a +0 e data a +4 su x86_64
+    *     (12 byte), a +8 su aarch64 (16 byte)
+    * return: 0 se riuscita, negativo in caso di errore
+    */
+#ifdef __aarch64__
+    asminline(
+        mov x8, SYS_EPOLL_CTL
+        svc #0
+    ) endasm
+#else
+    asminline(
+        mov r10, rcx
+        mov rax, SYS_EPOLL_CTL
+        syscall
+    ) endasm
+#endif
+
+
+def sys_epoll_pwait(epfd: int, events: str, maxevents: int, timeout: int) -> int:
+    /*
+    * Aspetta gli eventi di un'istanza epoll (syscall epoll_pwait senza
+    * maschera di segnali: aarch64 non ha epoll_wait).
+    * argomenti:
+    *   epfd: l'istanza epoll
+    *   events: il buffer per maxevents struct epoll_event
+    *   maxevents: quanti eventi al massimo
+    *   timeout: i millisecondi, -1 per aspettare senza limite
+    * return: il numero di eventi pronti, negativo in caso di errore
+    */
+#ifdef __aarch64__
+    asminline(
+        mov x4, xzr
+        mov x5, 8
+        mov x8, SYS_EPOLL_PWAIT
+        svc #0
+    ) endasm
+#else
+    asminline(
+        mov r10, rcx
+        xor r8, r8
+        mov r9, 8
+        mov rax, SYS_EPOLL_PWAIT
+        syscall
+    ) endasm
+#endif
+
+
+def sys_accept4(fd_sock: SOCKET, flags: int) -> int:
+    /*
+    * Accetta una connessione senza leggere l'indirizzo del client (syscall
+    * accept4).
+    * argomenti:
+    *   fd_sock: il socket in ascolto
+    *   flags: SOCK_NONBLOCK (2048) e SOCK_CLOEXEC (524288), in OR
+    * return: il fd del client, negativo in caso di errore (-11 se il socket
+    *   non e' bloccante e non c'e' nessun client in coda)
+    */
+#ifdef __aarch64__
+    asminline(
+        mov x3, x1
+        mov x1, xzr
+        mov x2, xzr
+        mov x8, SYS_ACCEPT4
+        svc #0
+    ) endasm
+#else
+    asminline(
+        mov r10, rsi
+        xor rsi, rsi
+        xor rdx, rdx
+        mov rax, SYS_ACCEPT4
+        syscall
+    ) endasm
+#endif
+
+
+def sys_send_nosignal(fd: SOCKET, buf: str, length: long) -> long:
+    /*
+    * Scrive su un socket come write(), con MSG_NOSIGNAL: se il client ha
+    * gia' chiuso la connessione restituisce -32 (EPIPE) invece di uccidere il
+    * processo con SIGPIPE.
+    * argomenti:
+    *   fd: il socket
+    *   buf: i byte da scrivere
+    *   length: quanti byte
+    * return: i byte scritti, negativo in caso di errore
+    */
+#ifdef __aarch64__
+    asminline(
+        mov x3, 0x4000
+        mov x4, xzr
+        mov x5, xzr
+        mov x8, SYS_SENDTO
+        svc #0
+    ) endasm
+#else
+    asminline(
+        mov r10, 0x4000
+        xor r8, r8
+        xor r9, r9
+        mov rax, SYS_SENDTO
+        syscall
+    ) endasm
+#endif
+
+
+def sys_socket(ip_family: int, sock_type: int, protocol: int) -> int:
+    /*
+    * Crea un socket (syscall socket).
+    * argomenti:
+    *   ip_family: la famiglia di indirizzi, es. AF_INET
+    *   sock_type: il tipo, es. SOCK_STREAM o SOCK_DGRAM
+    *   protocol: il protocollo, 0 per quello del tipo
+    * return: il fd del socket, negativo in caso di errore
+    */
+#ifdef __aarch64__
+    asminline(
+        mov x8, SYS_SOCKET
+        svc #0
+    ) endasm
+#else
+    asminline(
+        mov rax, SYS_SOCKET
+        syscall
+    ) endasm
+#endif
+
+
+def sys_connect(sockfd: int, sockaddr: Sockaddr_in) -> int:
+    /*
+    * Connette un socket a un indirizzo IPv4 (syscall connect).
+    * argomenti:
+    *   sockfd: il socket
+    *   sockaddr: l'indirizzo
+    * return: 0 se riuscita, negativo in caso di errore
+    */
+#ifdef __aarch64__
+    asminline(
+        mov x2, 16
+        mov x8, SYS_CONNECT
+        svc #0
+    ) endasm
+#else
+    asminline(
+        mov rdx, 16
+        mov rax, SYS_CONNECT
+        syscall
+    ) endasm
+#endif
+
+
+def sys_bind(fd_sock: int, addr: Sockaddr_in) -> int:
+    /*
+    * Lega un socket a un indirizzo IPv4 e a una porta (syscall bind).
+    * argomenti:
+    *   fd_sock: il socket
+    *   addr: l'indirizzo
+    * return: 0 se riuscita, negativo in caso di errore
+    */
+#ifdef __aarch64__
+    asminline(
+        mov x2, 16
+        mov x8, SYS_BIND
+        svc #0
+    ) endasm
+#else
+    asminline(
+        mov rdx, 16
+        mov rax, SYS_BIND
+        syscall
+    ) endasm
+#endif
+
+
+def sys_listen(fd_sock: int, size_queue: int) -> int:
+    /*
+    * Mette un socket in ascolto (syscall listen).
+    * argomenti:
+    *   fd_sock: il socket
+    *   size_queue: quante connessioni possono aspettare in coda
+    * return: 0 se riuscita, negativo in caso di errore
+    */
+#ifdef __aarch64__
+    asminline(
+        mov x8, SYS_LISTEN
+        svc #0
+    ) endasm
+#else
+    asminline(
+        mov rax, SYS_LISTEN
+        syscall
+    ) endasm
+#endif
+
+
+def sys_accept(fd_sock: int, addr: Sockaddr_in, len_sockaddr_in: &int) -> int:
+    /*
+    * Accetta una connessione e scrive in addr l'indirizzo del client
+    * (syscall accept).
+    * argomenti:
+    *   fd_sock: il socket in ascolto
+    *   addr: dove scrivere l'indirizzo del client
+    *   len_sockaddr_in: un int con la dimensione di addr (16), in cui il
+    *     kernel scrive quella usata
+    * return: il fd del client, negativo in caso di errore
+    */
+#ifdef __aarch64__
+    asminline(
+        mov x8, SYS_ACCEPT
+        svc #0
+    ) endasm
+#else
+    asminline(
+        mov rax, SYS_ACCEPT
+        syscall
+    ) endasm
+#endif
+
+
+def sys_getsockopt_n(sockfd: int, level: int, optname: int, optval: long, optlen: &int) -> int:
+    /*
+    * Legge un'opzione di un socket (syscall getsockopt).
+    * argomenti:
+    *   sockfd: il socket
+    *   level: il livello, es. SOL_SOCKET1
+    *   optname: l'opzione
+    *   optval: l'indirizzo del buffer per il valore
+    *   optlen: la dimensione del buffer, in cui il kernel scrive quella usata
+    * return: 0 se riuscita, negativo in caso di errore
+    */
+#ifdef __aarch64__
+    asminline(
+        mov x8, SYS_GETSOCKOPT
+        svc #0
+    ) endasm
+#else
+    asminline (
+        mov r10, rcx
+        mov rax, SYS_GETSOCKOPT
+        syscall
+    ) endasm
+#endif
+
+
+def sys_getsockopt(sockfd: int, level: int, optname: int, optval: &int) -> int:
+    /*
+    * Come sys_getsockopt_n, per un'opzione 'int' (es. TCP_NODELAY).
+    * argomenti:
+    *   sockfd: il socket
+    *   level: il livello
+    *   optname: l'opzione
+    *   optval: dove scrivere il valore
+    * return: 0 se riuscita, negativo in caso di errore
+    */
+    size = 4
+    unsafe:
+        return sys_getsockopt_n(sockfd, level, optname, optval as long, &size)
+
+
+def sys_setsockopt(sockfd: int, level: int, optname: int, optval: &int) -> int:
+    /*
+    * Imposta un'opzione 'int' di un socket (syscall setsockopt).
+    * argomenti:
+    *   sockfd: il socket
+    *   level: il livello, es. SOL_SOCKET1
+    *   optname: l'opzione
+    *   optval: il valore, es. &mio_int
+    * return: 0 se riuscita, negativo in caso di errore
+    */
+#ifdef __aarch64__
+    asminline(
+        mov x4, 4
+        mov x8, SYS_SETSOCKOPT
+        svc #0
+    ) endasm
+#else
+    asminline (
+        mov r10, rcx
+        mov r8, 4
+        mov rax, SYS_SETSOCKOPT
+        syscall
+    ) endasm
+#endif
+
+
+def sys_setsockopt_n(sockfd: int, level: int, optname: int, optval: long, optlen: int) -> int:
+    /*
+    * Imposta un'opzione di un socket con un valore di qualunque dimensione
+    * (syscall setsockopt), es. la struct timeval di SO_RCVTIMEO.
+    * argomenti:
+    *   sockfd: il socket
+    *   level: il livello, es. SOL_SOCKET1
+    *   optname: l'opzione
+    *   optval: l'indirizzo del valore
+    *   optlen: la sua dimensione in byte
+    * return: 0 se riuscita, negativo in caso di errore
+    */
+#ifdef __aarch64__
+    asminline(
+        mov x8, SYS_SETSOCKOPT
+        svc #0
+    ) endasm
+#else
+    asminline (
+        mov r10, rcx
+        mov rax, SYS_SETSOCKOPT
+        syscall
+    ) endasm
+#endif
+
+
+def set_recv_timeout(sockfd: int, seconds: long) -> int:
+    /*
+    * Imposta il timeout di ricezione di un socket (SO_RCVTIMEO): una recv()
+    * che aspetta di piu' fallisce con EAGAIN.
+    * argomenti:
+    *   sockfd: il socket
+    *   seconds: i secondi
+    * return: 0 se riuscita, negativo in caso di errore
+    */
+    timeval_buf = rt_alloc_up(16)
+    unsafe:
+        timeval_view = timeval_buf as ptr long
+        timeval_view[0] = seconds
+        timeval_view[1] = 0 as long
+        return sys_setsockopt_n(sockfd, SOL_SOCKET1, SO_RCVTIMEO, timeval_buf as long, 16)
+
+
+def set_linger(sockfd: int, onoff: int, seconds: int) -> int:
+    /*
+    * Imposta SO_LINGER: con onoff 1 close aspetta fino a seconds secondi che
+    * i dati in coda partano (con 0 secondi chiude subito, con un reset); con
+    * onoff 0 close torna subito e il kernel li spedisce dopo, come di
+    * default.
+    * argomenti:
+    *   sockfd: il socket
+    *   onoff: 1 per attivarlo, 0 per spegnerlo
+    *   seconds: i secondi di attesa
+    * return: 0 se riuscita, negativo in caso di errore
+    */
+    lg = new Linger()
+    lg.l_onoff = onoff
+    lg.l_linger = seconds
+    unsafe:
+        return sys_setsockopt_n(sockfd, SOL_SOCKET1, SO_LINGER, lg as long, 8)
+
+
+def get_linger(sockfd: int) -> (int, int):
+    /*
+    * Legge SO_LINGER (vedi set_linger).
+    * argomenti:
+    *   sockfd: il socket
+    * return: (1 se attivo o 0, i secondi); (-1, l'errore) in caso di errore
+    */
+    lg = new Linger()
+    size = 8
+    unsafe:
+        response = sys_getsockopt_n(sockfd, SOL_SOCKET1, SO_LINGER, lg as long, &size)
+    if response < 0:
+        return -1, response
+
+    onoff = 0
+    if lg.l_onoff != 0:
+        onoff = 1
+    return onoff, lg.l_linger
+

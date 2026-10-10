@@ -1,0 +1,30 @@
+
+#ifdef __aarch64__
+#define SYS_GETRANDOM 278
+#else
+#define SYS_GETRANDOM 318
+#endif
+
+
+def sys_getrandom(buf: str, buflen: int, flags: int) -> int:
+    /*
+    * Riempie un buffer di byte casuali (syscall getrandom); puo' scriverne
+    * meno di quelli richiesti.
+    * argomenti:
+    *   buf: il buffer
+    *   buflen: quanti byte chiedere
+    *   flags: 0 per il comportamento normale
+    * return: i byte scritti, negativo in caso di errore
+    */
+#ifdef __aarch64__
+    asminline(
+        sxtw x1, w1
+        mov x8, SYS_GETRANDOM
+        svc #0
+    ) endasm
+#else
+    asminline(
+        mov rax, SYS_GETRANDOM
+        syscall
+    ) endasm
+#endif

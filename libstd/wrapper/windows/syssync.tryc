@@ -1,0 +1,71 @@
+/*
+* Windows x64: il futex di libstd/sync con WaitOnAddress e
+* WakeByAddress* (KernelBase.dll, da Windows 8). I parametri arrivano nei
+* registri degli asminline e vanno passati in quelli di Win64, con lo
+* stack allineato a 16 e 32 byte riservati (vedi wrapper/windows/dict).
+*/
+
+libextern <kernelbase.dll>
+
+
+#ifndef WAKE_UP_ALL
+#define WAKE_UP_ALL 2147483647
+#endif
+
+
+def sys_futex_wait(addr: str, expected: int) -> int:
+    /*
+    * Addormenta il thread, se la word a 32 bit in addr vale ancora
+    * expected, finche' un altro non lo sveglia con sys_futex_wake
+    * (WaitOnAddress). Come su Linux, la condizione va ricontrollata in un
+    * ciclo.
+    * argomenti:
+    *   addr: l'indirizzo della word
+    *   expected: il valore che la word deve avere per addormentarsi
+    * return: 0 se svegliato o se la word era gia' diversa, -1 altrimenti
+    */
+    asminline(
+        push rbx
+        mov rbx, rsp
+        and rsp, -16
+        sub rsp, 48
+        mov [rsp + 32], esi
+        mov rcx, rdi
+        lea rdx, [rsp + 32]
+        mov r8d, 4
+        mov r9d, -1
+        call WaitOnAddress
+        mov rsp, rbx
+        pop rbx
+        cmp eax, 1
+        sbb eax, eax
+    ) endasm
+
+
+def sys_futex_wake(addr: str, num_waiters: int) -> int:
+    /*
+    * Sveglia chi dorme in una sys_futex_wait sullo stesso indirizzo: uno
+    * solo se num_waiters e' 1, altrimenti tutti (WakeByAddressSingle e
+    * WakeByAddressAll).
+    * argomenti:
+    *   addr: l'indirizzo della word
+    *   num_waiters: 1 o WAKE_UP_ALL
+    * return: 0, Windows non dice quanti thread ha svegliato
+    */
+    asminline(
+        push rbx
+        mov rbx, rsp
+        and rsp, -16
+        sub rsp, 32
+        mov rcx, rdi
+        cmp esi, 1
+        je .single
+        call WakeByAddressAll
+        jmp .done
+        .single:
+            call WakeByAddressSingle
+        .done:
+        mov rsp, rbx
+        pop rbx
+        xor eax, eax
+    ) endasm

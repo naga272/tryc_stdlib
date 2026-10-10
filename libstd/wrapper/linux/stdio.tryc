@@ -1,0 +1,38 @@
+
+#ifndef SYS_READ
+#ifdef __aarch64__
+#define SYS_READ 63
+#else
+#define SYS_READ 0
+#endif
+#endif
+
+#ifndef SYS_WRITE
+#ifdef __aarch64__
+#define SYS_WRITE 64
+#else
+#define SYS_WRITE 1
+#endif
+#endif
+
+
+def sys_read(fd: int, start_offs: str, length: long) -> int:
+    /*
+    * Legge byte da un file descriptor (syscall read).
+    * argomenti:
+    *   fd: il file descriptor
+    *   start_offs: il buffer in cui scrivere
+    *   length: quanti byte leggere al massimo
+    * return: i byte letti, 0 a fine file, negativo in caso di errore
+    */
+#ifdef __aarch64__
+    asminline(
+        mov x8, SYS_READ
+        svc #0
+    ) endasm
+#else
+    asminline(
+        mov rax, SYS_READ
+        syscall
+    ) endasm
+#endif

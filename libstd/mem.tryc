@@ -1,0 +1,8 @@
+
+#include <libstd/macro>
+
+#ifdef __unix__
+#include <libstd/wrapper/linux/mem>
+#else
+#include <libstd/wrapper/windows/mem>
+#endif

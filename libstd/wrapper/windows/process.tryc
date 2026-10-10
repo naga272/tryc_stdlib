@@ -1,0 +1,676 @@
+/*
+* Windows x64: i processi con kernel32 ('extern def', convenzione Win64).
+* sys_fork duplica il processo come su Linux, ma lo fa il runtime
+* (rt_fork). Windows non sostituisce un processo con un altro: sys_execve
+* avvia il programma, lo aspetta ed esce con il suo exit code, come
+* _execve della CRT di Microsoft. system() usa 'cmd.exe /d /s /c
+* "comando"'. I segnali non ci sono: sys_kill termina il processo.
+*/
+
+#include <libstd/string>
+#include <libstd/wrapper/windows/kernel32>
+
+libextern <advapi32.dll>
+
+#ifndef CHILD_STACK_SIZE
+#define CHILD_STACK_SIZE (16 * 1024)  // stack per il figlio
+#endif
+
+
+// stessi numeri di Linux: su Windows li usano sys_kill e sys_wait4
+#define SIGHUP	    1	// Hangup (controllo terminale chiuso)
+#define SIGINT	    2	// Interruzione (Ctrl+C)
+#define SIGQUIT	    3	// Uscita (Ctrl+\)
+#define SIGILL	    4	// Istruzione illegale
+#define SIGTRAP	    5	// Trap (trappola)
+#define SIGABRT	    6	// Aborto
+#define SIGBUS	    7	// Errore di bus
+#define SIGFPE	    8	// Eccezione in virgola mobile
+#define SIGKILL     9   // Terminazione forzata, non catturabile
+#define SIGUSR1     10  // Segnale utente definito dall’applicazione
+#define SIGSEGV	    11	// Violazione di segmentazione
+#define SIGUSR2     12  // Altro segnale utente definito dall’applicazione
+#define SIGPIPE	    13	// Pipe rotta
+#define SIGALRM	    14	// Timer scaduto
+#define SIGTERM     15  // Terminazione richiesta
+#define SIGSTKFLT	16	// Errore di stack sul coprocessore
+#define SIGCHLD     17  // Il figlio è terminato
+#define SIGCONT	    18	// Continua l'esecuzione
+#define SIGSTOP	    19	// Ferma l'esecuzione (non catturabile)
+#define SIGTSTP	    20	// Ferma l'esecuzione (Ctrl+Z)
+#define SIGTTIN	    21	// Lettura in background da terminale
+#define SIGTTOU	    22	// Scrittura in background su terminale
+#define SIGURG	    23	// Dati urgenti disponibili su socket
+#define SIGXCPU	    24	// Limite di tempo CPU superato
+#define SIGXFSZ	    25	// Limite di dimensione file superato
+#define SIGVTALRM	26	// Timer virtuale scaduto
+#define SIGPROF	    27	// Timer di profiling scaduto
+#define SIGWINCH	28	// Cambio di dimensione finestra terminale
+#define SIGPOLL	    29	// Evento pollable
+#define SIGIO	    29	// I/O ora possibile
+#define SIGPWR	    30	// Guasto di alimentazione
+#define SIGSYS	    31	// Chiamata di sistema non valida
+
+#define ECHILD -10      // error child
+#define ESRCH -3        // nessun processo con quel pid
+
+
+#ifndef WNOHANG
+// wait4: non bloccare se il processo non e' ancora terminato
+#define WNOHANG 1
+#endif
+
+
+#ifndef PROCESS_TERMINATE
+// OpenProcess: terminare il processo, leggerne l'exit code
+#define PROCESS_TERMINATE 1
+#endif
+
+#ifndef PROCESS_QUERY_LIMITED_INFORMATION
+#define PROCESS_QUERY_LIMITED_INFORMATION 4096
+#endif
+
+#ifndef ERROR_INVALID_PARAMETER
+// GetLastError di OpenProcess per un pid che non c'e'
+#define ERROR_INVALID_PARAMETER 87
+#endif
+
+#ifndef STATUS_ACCESS_VIOLATION
+// l'exit code di un processo ucciso da un'eccezione (NTSTATUS)
+#define STATUS_ACCESS_VIOLATION -1073741819         // 0xC0000005
+#endif
+
+#ifndef STATUS_ILLEGAL_INSTRUCTION
+#define STATUS_ILLEGAL_INSTRUCTION -1073741795      // 0xC000001D
+#endif
+
+#ifndef STATUS_INTEGER_DIVIDE_BY_ZERO
+#define STATUS_INTEGER_DIVIDE_BY_ZERO -1073741676   // 0xC0000094
+#endif
+
+#ifndef STATUS_STACK_OVERFLOW
+#define STATUS_STACK_OVERFLOW -1073741571           // 0xC00000FD
+#endif
+
+// OpenProcessToken e GetTokenInformation
+#ifndef TOKEN_QUERY
+#define TOKEN_QUERY 8
+#endif
+
+#ifndef TOKEN_USER_CLASS
+#define TOKEN_USER_CLASS 1
+#endif
+
+#ifndef TOKEN_PRIMARY_GROUP_CLASS
+#define TOKEN_PRIMARY_GROUP_CLASS 5
+#endif
+
+#ifndef TOKEN_ELEVATION_CLASS
+#define TOKEN_ELEVATION_CLASS 20
+#endif
+
+#ifndef TOKEN_INFO_SIZE
+#define TOKEN_INFO_SIZE 256
+#endif
+
+// CreateToolhelp32Snapshot: tutti i processi del sistema
+#ifndef TH32CS_SNAPPROCESS
+#define TH32CS_SNAPPROCESS 2
+#endif
+
+
+// byte di STARTUPINFOA e di PROCESSENTRY32
+#ifndef STARTUPINFOA_SIZE
+#define STARTUPINFOA_SIZE 104
+#endif
+
+#ifndef PROCESSENTRY32_SIZE
+#define PROCESSENTRY32_SIZE 304
+#endif
+
+
+// PROCESS_INFORMATION
+class WinProcessInformation --no-padding:
+    process long
+    thread long
+    process_id int
+    thread_id int
+
+
+// dal runtime (os/windows.c)
+extern def rt_fork() -> int
+extern def rt_fork_wait(pid: long, nohang: long, code: &int) -> int
+
+extern def GetCurrentProcessId() -> int
+extern def CreateProcessA(application: str, command_line: str, process_attributes: long, thread_attributes: long, inherit_handles: int, creation_flags: int, environment: str, current_directory: long, startup_info: str, process_information: WinProcessInformation) -> int
+extern def OpenProcess(desired_access: int, inherit_handle: int, process_id: int) -> long
+extern def TerminateProcess(process: long, exit_code: int) -> int
+extern def GetExitCodeProcess(process: long, exit_code: &int) -> int
+extern def GetSystemDirectoryA(buffer: str, size: int) -> int
+extern def CreateToolhelp32Snapshot(flags: int, process_id: int) -> long
+extern def Process32First(snapshot: long, entry: str) -> int
+extern def Process32Next(snapshot: long, entry: str) -> int
+extern def OpenProcessToken(process: long, access: int, token: &long) -> int
+extern def GetTokenInformation(token: long, info_class: int, info: str, length: int, returned: &int) -> int
+
+
+def get_pid() -> int:
+    /*
+    * Restituisce il pid del processo.
+    * return: il pid
+    */
+    return GetCurrentProcessId()
+
+
+def get_ppid() -> int:
+    /*
+    * Restituisce il pid del processo padre, dalla lista dei processi.
+    * return: il pid del padre, -1 se non si trova
+    */
+    snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)
+    if snapshot == -1 as long:
+        return -1
+
+    entry = rt_alloc_up(PROCESSENTRY32_SIZE)
+    unsafe:
+        fields = entry as ptr int
+    fields[0] = PROCESSENTRY32_SIZE
+
+    me = GetCurrentProcessId()
+    ppid = -1
+    found = Process32First(snapshot, entry)
+    while found != 0:
+        if fields[2] == me:
+            ppid = fields[8]
+            break
+        found = Process32Next(snapshot, entry)
+
+    CloseHandle(snapshot)
+    return ppid
+
+
+def sys_fork() -> int:
+    /*
+    * Crea un processo figlio, copia del chiamante, come fork su Linux: il
+    * runtime (rt_fork) avvia lo stesso .exe e gli copia memoria, stack e fd,
+    * e il figlio riparte da qui.
+    * return: il pid del figlio nel padre, 0 nel figlio, -errno in caso di
+    *   errore
+    */
+    return rt_fork()
+
+
+def sys_vfork() -> int:
+    /*
+    * Come sys_fork: Windows non ha un vfork.
+    * return: il pid del figlio nel padre, 0 nel figlio, -errno in caso di
+    *   errore
+    */
+    return sys_fork()
+
+
+def sys_kill(pid: int, sig: int) -> int:
+    /*
+    * Come kill su Linux, ma i segnali non ci sono: con sig 0 controlla solo
+    * che il processo esista, con ogni altro lo termina con exit code 128 +
+    * sig, come lo riporta una shell.
+    * argomenti:
+    *   pid: il processo
+    *   sig: il segnale
+    * return: 0 se riuscita, -errno in caso di errore (ESRCH se il processo
+    *   non c'e')
+    */
+    if pid <= 0:
+        return WIN_EINVAL
+
+    access = PROCESS_QUERY_LIMITED_INFORMATION
+    if sig != 0:
+        access = PROCESS_TERMINATE
+
+    process = OpenProcess(access, 0, pid)
+    if process == 0 as long:
+        err = GetLastError()
+        if err == ERROR_INVALID_PARAMETER:
+            return ESRCH
+        return win_error(err)
+
+    result = 0
+    if sig != 0:
+        if TerminateProcess(process, 128 + sig) == 0:
+            result = win_error(GetLastError())
+
+    CloseHandle(process)
+    return result
+
+
+def win_is_null(s: str) -> int:
+    /*
+    * Controlla se una stringa e' il puntatore nullo.
+    * argomenti:
+    *   s: la stringa
+    * return: 1 se e' 0, 0 altrimenti
+    */
+    unsafe:
+        address = s as long
+    return address == 0 as long
+
+
+def win_token_info(info_class: int) -> str:
+    /*
+    * Legge un'informazione del token del processo (GetTokenInformation);
+    * TOKEN_USER, TOKEN_PRIMARY_GROUP e TOKEN_ELEVATION stanno in
+    * TOKEN_INFO_SIZE byte.
+    * argomenti:
+    *   info_class: l'informazione, TOKEN_*_CLASS
+    * return: il buffer, 0 se non si legge
+    */
+    token = 0 as long
+    if OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token) == 0:
+        return 0 as str
+
+    info = rt_alloc_up(TOKEN_INFO_SIZE)
+    size = 0
+    ok = GetTokenInformation(token, info_class, info, TOKEN_INFO_SIZE, &size)
+    CloseHandle(token)
+    if ok == 0:
+        return 0 as str
+
+    return info
+
+
+def win_token_rid(info_class: int) -> int:
+    /*
+    * Restituisce l'ultimo numero (RID) del SID dell'utente o del gruppo
+    * primario del processo, che fa da uid e gid come in Cygwin.
+    * argomenti:
+    *   info_class: TOKEN_USER_CLASS o TOKEN_PRIMARY_GROUP_CLASS
+    * return: il RID, -1 se il token non si legge
+    */
+    info = win_token_info(info_class)
+    if win_is_null(info):
+        return -1
+
+    unsafe:
+        pointers = info as ptr long
+    sid = pointers[0]
+    unsafe:
+        sid_bytes = sid as ptr char
+        sid_words = sid as ptr int
+    count = char_to_int(sid_bytes[1])
+    return sid_words[1 + count]
+
+
+def get_uid() -> int:
+    /*
+    * Restituisce l'uid del processo: il RID dell'utente, es. 1001 per un
+    * utente locale.
+    * return: lo uid, -1 se non si legge
+    */
+    return win_token_rid(TOKEN_USER_CLASS)
+
+
+def get_euid() -> int:
+    /*
+    * Restituisce l'uid effettivo: 0, come per l'amministratore su Linux, se
+    * il processo e' elevato (UAC), altrimenti get_uid().
+    * return: lo uid effettivo
+    */
+    info = win_token_info(TOKEN_ELEVATION_CLASS)
+    if win_is_null(info) == 0:
+        unsafe:
+            elevated = info as ptr int
+        if elevated[0] != 0:
+            return 0
+
+    return get_uid()
+
+
+def get_gid() -> int:
+    /*
+    * Restituisce il gid del processo: il RID del gruppo primario, spesso
+    * l'utente stesso.
+    * return: il gid, -1 se non si legge
+    */
+    return win_token_rid(TOKEN_PRIMARY_GROUP_CLASS)
+
+
+def get_egid() -> int:
+    /*
+    * Restituisce il gid effettivo, uguale a get_gid().
+    * return: il gid
+    */
+    return get_gid()
+
+
+def win_startup_info() -> str:
+    /*
+    * Prepara uno STARTUPINFOA a zero, con la sua dimensione nel campo cb.
+    * return: il buffer
+    */
+    startup = rt_alloc_up(STARTUPINFOA_SIZE)
+    unsafe:
+        words = startup as ptr long
+    i = 0
+    while i < STARTUPINFOA_SIZE / 8:
+        words[i] = 0 as long
+        i++
+
+    words[0] = STARTUPINFOA_SIZE as long
+    return startup
+
+
+def win_create_process(application: str, line: str, environment: str, info: WinProcessInformation) -> int:
+    /*
+    * Avvia un programma senza aspettarlo (CreateProcessA). Il figlio eredita
+    * gli handle ereditabili: scrive dove scrive il chiamante, anche in una
+    * pipe.
+    * argomenti:
+    *   application: il percorso dell'eseguibile
+    *   line: la riga di comando
+    *   environment: il blocco dell'ambiente, 0 per quello attuale
+    *   info: dove scrivere handle e pid del processo; l'handle del thread e'
+    *     gia' chiuso
+    * return: 1 se e' partito, 0 altrimenti (l'errore in GetLastError)
+    */
+    if CreateProcessA(application, line, 0 as long, 0 as long, 1, 0, environment, 0 as long, win_startup_info(), info) == 0:
+        return 0
+
+    CloseHandle(info.thread)
+    return 1
+
+
+def win_quote_arg(arg: str) -> str:
+    /*
+    * Scrive un argomento per la riga di comando in modo che rt_init_args e
+    * la CRT di Microsoft lo rileggano uguale: fra virgolette se contiene
+    * spazi, tab o virgolette, con i backslash raddoppiati solo davanti a una
+    * virgoletta.
+    * argomenti:
+    *   arg: l'argomento
+    * return: l'argomento pronto per la riga di comando
+    */
+    n = strlen(arg)
+    plain = n > 0
+    i = 0 as long
+    while i < n:
+        c = arg[i]
+        if c == ' ' or c == '\t' or c == '"':
+            plain = 0
+        i++
+
+    if plain:
+        return arg
+
+    out = ""
+    out = out + '"'
+    backslashes = 0
+    i = 0 as long
+    while i < n:
+        c = arg[i]
+        if c == '\\':
+            backslashes++
+        else:
+            if c == '"':
+                backslashes = backslashes * 2 + 1
+            while backslashes > 0:
+                out = out + '\\'
+                backslashes--
+            out = out + c
+        i++
+
+    backslashes = backslashes * 2
+    while backslashes > 0:
+        out = out + '\\'
+        backslashes--
+    out = out + '"'
+    return out
+
+
+def win_command_line(argv: str) -> str:
+    /*
+    * Unisce gli argomenti in una riga di comando, con win_quote_arg.
+    * argomenti:
+    *   argv: l'array degli argomenti, terminato da 0
+    * return: la riga di comando
+    */
+    unsafe:
+        words = argv as ptr long
+        items = argv as ptr str
+    line = ""
+    i = 0
+    while words[i] != 0 as long:
+        if i > 0:
+            line = line + ' '
+        line = line + win_quote_arg(items[i])
+        i++
+
+    return line
+
+
+def win_environment_block(envp: str) -> str:
+    /*
+    * Prepara il blocco dell'ambiente per CreateProcessA: le stringhe una
+    * dopo l'altra, ognuna con il suo terminatore, e un terminatore in piu'
+    * alla fine (due se envp e' vuoto).
+    * argomenti:
+    *   envp: l'array di "NOME=valore", terminato da 0
+    * return: il blocco
+    */
+    unsafe:
+        words = envp as ptr long
+        items = envp as ptr str
+    total = 1 as long
+    i = 0
+    while words[i] != 0 as long:
+        total = total + strlen(items[i]) + 1
+        i++
+    if i == 0:
+        total = 2
+
+    block = rt_alloc_up(total)
+    pos = 0 as long
+    i = 0
+    while words[i] != 0 as long:
+        n = strlen(items[i])
+        memcpy(block + pos, items[i], n as long)
+        block[pos + n] = '\0'
+        pos = pos + n + 1
+        i++
+    block[pos] = '\0'
+    if i == 0:
+        block[1] = '\0'
+    return block
+
+
+def sys_execve(path_name: str, argv: str, envp: str) -> int:
+    /*
+    * Come execve su Linux, ma Windows non sostituisce un processo con un
+    * altro: avvia path_name, lo aspetta ed esce con il suo exit code. Il
+    * nuovo processo eredita 0, 1, 2 e gli fd di sys_dup2.
+    * argomenti:
+    *   path_name: il percorso dell'eseguibile, con l'estensione, non cercato
+    *     nel PATH
+    *   argv: l'array degli argomenti, terminato da 0
+    *   envp: l'array dell'ambiente, terminato da 0; 0 per quello attuale
+    * return: -errno se il programma non parte; se parte non ritorna
+    */
+    environment = 0 as str
+    if win_is_null(envp) == 0:
+        environment = win_environment_block(envp)
+
+    info = new WinProcessInformation()
+    if win_create_process(path_name, win_command_line(argv), environment, info) == 0:
+        return win_error(GetLastError())
+
+    exit(win_wait_process(info.process))
+    return -1
+
+
+def win_wait_status(code: int) -> int:
+    /*
+    * Traduce un exit code di Windows nello stato di wait4 di Linux:
+    * l'uscita normale negli 8 bit alti, un'eccezione (accesso non valido,
+    * istruzione illegale, divisione per zero) come la terminazione per il
+    * segnale corrispondente.
+    * argomenti:
+    *   code: l'exit code
+    * return: lo stato
+    */
+    if code == STATUS_ACCESS_VIOLATION or code == STATUS_STACK_OVERFLOW:
+        return SIGSEGV
+    if code == STATUS_ILLEGAL_INSTRUCTION:
+        return SIGILL
+    if code == STATUS_INTEGER_DIVIDE_BY_ZERO:
+        return SIGFPE
+    return (code & 255) << 8
+
+
+def sys_wait4(pid: int, wstatus: &int, options: int, rusage: long) -> int:
+    /*
+    * Come wait4 su Linux. I figli di sys_fork li tiene il runtime, anche con
+    * pid -1; un altro processo si aspetta per pid finche' qualcuno ne tiene
+    * un handle, altrimenti e' gia' sparito (ECHILD).
+    * argomenti:
+    *   pid: il processo, -1 per un figlio qualunque
+    *   wstatus: dove scrivere lo stato di uscita (vedi win_wait_status)
+    *   options: 0 o WNOHANG
+    *   rusage: non usato
+    * return: il pid, 0 con WNOHANG se non e' ancora terminato, -errno in
+    *   caso di errore
+    */
+    nohang = 0
+    timeout = INFINITE
+    if (options & WNOHANG) != 0:
+        nohang = 1
+        timeout = 0
+
+    code = 0
+    done = rt_fork_wait(pid as long, nohang as long, &code)
+    if done != ECHILD:
+        if done > 0:
+            wstatus[0] = win_wait_status(code)
+        return done
+
+    if pid <= 0:
+        return ECHILD
+
+    process = OpenProcess(SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION, 0, pid)
+    if process == 0 as long:
+        return ECHILD
+
+    waited = WaitForSingleObject(process, timeout)
+    if waited == WAIT_TIMEOUT:
+        CloseHandle(process)
+        return 0
+
+    if waited == WAIT_FAILED or GetExitCodeProcess(process, &code) == 0:
+        result = win_error(GetLastError())
+        CloseHandle(process)
+        return result
+
+    CloseHandle(process)
+    wstatus[0] = win_wait_status(code)
+    return pid
+
+
+def win_spawn_shell(command: str) -> long:
+    /*
+    * Avvia 'cmd.exe /d /s /c "command"' senza aspettarlo: /s toglie solo le
+    * virgolette esterne, /d salta gli AutoRun del registro. cmd.exe e' quello
+    * di System32, mai uno della cartella corrente.
+    * argomenti:
+    *   command: il comando
+    * return: l'handle del processo, 0 se non e' partito
+    */
+    dir = rt_alloc_up(261)
+    n = GetSystemDirectoryA(dir, 261)
+    if n <= 0 or n > 260:
+        return 0 as long
+
+    info = new WinProcessInformation()
+    line = "cmd.exe /d /s /c \"" + command + "\""
+    if win_create_process(dir + "\\cmd.exe", line, 0 as str, info) == 0:
+        return 0 as long
+
+    return info.process
+
+
+def win_wait_process(process: long) -> int:
+    /*
+    * Aspetta che un processo termini e ne chiude l'handle.
+    * argomenti:
+    *   process: l'handle del processo
+    * return: il suo exit code a 32 bit, -1 se l'attesa fallisce
+    */
+    code = -1
+    if WaitForSingleObject(process, INFINITE) != WAIT_FAILED:
+        if GetExitCodeProcess(process, &code) == 0:
+            code = -1
+
+    CloseHandle(process)
+    return code
+
+
+def exec_shell(cmd: str) -> int:
+    /*
+    * Come su Linux sostituisce il chiamante con il comando, ma Windows non
+    * ha execve: esegue cmd, lo aspetta ed esce con il suo exit code.
+    * argomenti:
+    *   cmd: il comando
+    * return: negativo se il comando non parte; se parte non ritorna
+    */
+    process = win_spawn_shell(cmd)
+    if process == 0 as long:
+        return -1
+
+    exit(win_wait_process(process))
+    return -1
+
+
+def wait_for_pid(pid: int) -> int:
+    /*
+    * Aspetta che un processo termini.
+    * argomenti:
+    *   pid: il processo, es. un figlio di sys_fork
+    * return: il suo exit code a 32 bit, -1 se il processo non c'e' o
+    *   l'attesa fallisce
+    */
+    code = 0
+    if rt_fork_wait(pid as long, 0 as long, &code) > 0:
+        return code
+
+    process = OpenProcess(SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION, 0, pid)
+    if process == 0 as long:
+        return -1
+
+    return win_wait_process(process)
+
+
+def reap_zombie_children() -> int:
+    /*
+    * Come su Linux raccoglie, senza aspettare, i figli di sys_fork gia'
+    * terminati; su Windows il runtime ne chiude l'handle.
+    * return: quanti figli ha raccolto
+    */
+    count = 0
+    code = 0
+    while rt_fork_wait(-1 as long, 1 as long, &code) > 0:
+        count++
+
+    return count
+
+
+def system(command: str) -> int:
+    /*
+    * Esegue un comando con 'cmd.exe /c' e aspetta che finisca, come system()
+    * del C.
+    * argomenti:
+    *   command: il comando
+    * return: l'exit code del comando a 32 bit, -1 se non parte
+    */
+    process = win_spawn_shell(command)
+    if process == 0 as long:
+        print("system: impossibile eseguire '" + command + "'\n")
+        return -1
+
+    return win_wait_process(process)

@@ -1,0 +1,180 @@
+/*
+* Numeri casuali, su due livelli:
+*
+* 1) l'entropia del sistema operativo (getrandom_bytes,
+*    random_seed_from_os): lenta, ma adatta alla crittografia. Serve a
+*    seminare il generatore veloce, non a produrre ogni numero.
+*
+* 2) un generatore veloce xorshift64* (RandomState, random_next e le
+*    funzioni che lo usano): adatto a simulazioni, giochi e
+*    campionamenti, ma prevedibile da chi ne osserva abbastanza output.
+*    Mai per token, password o nonce: per quelli c'e' getrandom_bytes.
+*
+* Ogni funzione riceve il suo RandomState: generatori diversi danno
+* sequenze indipendenti, ognuna riproducibile con il proprio seme.
+*/
+
+#include <libstd/type>
+#ifdef __unix__
+#include <libstd/wrapper/linux/sysrandom>
+#else
+#include <libstd/wrapper/windows/sysrandom>
+#endif
+
+
+def getrandom_bytes(buf: str, n: int) -> int:
+    /*
+    * Riempie buf con n byte casuali del sistema operativo, adatti alla
+    * crittografia. Su errore stampa un messaggio e termina il programma.
+    * argomenti:
+    *   buf: il buffer, di almeno n byte
+    *   n: quanti byte
+    * return: n
+    */
+    got = 0
+    while got < n:
+        remaining_buf = buf + got
+        remaining_n = n - got
+        r = sys_getrandom(remaining_buf, remaining_n, 0)
+        if r < 0:
+            print("Error in getrandom_bytes! sys_getrandom failed\n")
+            exit(1)
+        got = got + r
+    return n
+
+
+def random_seed_from_os() -> long:
+    /*
+    * Restituisce un seme casuale preso dal sistema operativo, per
+    * random_seed.
+    * return: 64 bit casuali (anche negativi)
+    */
+    buf = rt_alloc_up(8)
+    getrandom_bytes(buf, 8)
+    unsafe:
+        p = buf as ptr long
+        seed = p[0]
+    return seed
+
+
+class RandomState:
+    /*
+    * Lo stato di un generatore xorshift64*: si crea con random_new, oppure
+    * con new RandomState() e random_seed.
+    */
+    state long
+
+
+def random_seed(rng: RandomState, seed: long) -> None:
+    /*
+    * Inizializza un generatore con un seme: lo stesso seme da' sempre la
+    * stessa sequenza. Il seme 0 vale come una costante fissa diversa da zero.
+    * argomenti:
+    *   rng: il generatore
+    *   seed: il seme, qualsiasi valore
+    * return: nessuno (procedura)
+    */
+    if seed == (0 as long):
+        seed = 0x9E3779B97F4A7C15 as long
+    rng.state = seed
+
+
+def random_new() -> RandomState:
+    /*
+    * Crea un generatore con un seme casuale del sistema operativo.
+    * return: il generatore
+    */
+    rng = new RandomState()
+    random_seed(rng, random_seed_from_os())
+    return rng
+
+
+def random_next(rng: RandomState) -> long:
+    /*
+    * Restituisce il prossimo numero della sequenza (xorshift64*).
+    * argomenti:
+    *   rng: il generatore
+    * return: 64 bit casuali (anche negativi)
+    */
+    if rng.state == (0 as long):
+        rng.state = 0x9E3779B97F4A7C15 as long
+
+    x = rng.state
+    x = x ^ ((x >> (12 as long)) & (0xfffffffffffff as long))
+    x = x ^ (x << (25 as long))
+    x = x ^ ((x >> (27 as long)) & (0x1fffffffff as long))
+    rng.state = x
+    return x * (0x2545F4914F6CDD1D as long)
+
+
+def random_long(rng: RandomState, min: long, max: long) -> long:
+    /*
+    * Restituisce un long casuale fra min e max, estremi compresi, con
+    * distribuzione uniforme. Se max < min stampa un messaggio e termina il
+    * programma.
+    * argomenti:
+    *   rng: il generatore
+    *   min: il minimo
+    *   max: il massimo
+    * return: il numero
+    */
+    if max < min:
+        print("Error in random_long! 'max' must be >= 'min'\n")
+        exit(1)
+
+    if max == min:
+        return min
+
+    span = max - min + 1
+
+    long_max_const = 0x7FFFFFFFFFFFFFFF as long
+
+    if span <= (0 as long):
+        raw = random_next(rng)
+        return min + (raw & long_max_const) % ((max - min) as long)
+
+    usable = (long_max_const / span) * span
+
+    raw = random_next(rng) & long_max_const
+    while raw >= usable:
+        raw = random_next(rng) & long_max_const
+
+    offset = raw % span
+    return min + offset
+
+
+def random_int(rng: RandomState, min: int, max: int) -> int:
+    /*
+    * Restituisce un int casuale fra min e max, estremi compresi, come
+    * random_long.
+    * argomenti:
+    *   rng: il generatore
+    *   min: il minimo
+    *   max: il massimo
+    * return: il numero
+    */
+    r = random_long(rng, min as long, max as long)
+    return long_to_int(r)
+
+
+def random_float(rng: RandomState) -> float:
+    /*
+    * Restituisce un float casuale fra 0.0 compreso e 1.0 escluso.
+    * argomenti:
+    *   rng: il generatore
+    * return: il numero
+    */
+    raw = random_next(rng) & (0x7FFFFFFFFFFFFFFF as long)
+    top53 = raw >> (10 as long)
+    return (top53 as float) / 9007199254740992.0
+
+
+def random_bool(rng: RandomState) -> int:
+    /*
+    * Restituisce 0 o 1 a caso.
+    * argomenti:
+    *   rng: il generatore
+    * return: 0 o 1
+    */
+    raw = random_next(rng) & (0x7FFFFFFFFFFFFFFF as long)
+    return long_to_int(raw % (2 as long))

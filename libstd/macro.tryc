@@ -1,0 +1,67 @@
+// __unix__/__linux__ o _WIN32/_WIN64 li definisce il compilatore
+
+#ifdef __unix__
+
+#ifdef __aarch64__
+// aarch64 non ha pipe, select, pause e alarm
+#define SYS_RT_SIGACTION 134
+#define SYS_RT_SIGPROCMASK 135
+#define SYS_RT_SIGRETURN 139
+
+#define SYS_PWRITE64 68
+#define SYS_READV 65
+#define SYS_WRITEV 66
+#define SYS_SCHED_YELD 124
+#define SYS_MREMAP 216
+#define SYS_MSYNC 227
+#define SYS_MINCORE 232
+#define SYS_MADVISE 233
+#define SYS_SHMGET 194
+#define SYS_SHMAT 196
+#define SYS_SHMCTL 195
+#define SYS_NANOSLEEP 101
+#define SYS_GETITIMER 102
+#define SYS_SETITEMER 103
+#define SYS_SENDFILE 71
+#define SYS_SENDTO 206
+#define SYS_RECVFROM 207
+#define SYS_SENDMSG 211
+#define SYS_RECVMSG 212
+#else
+#define SYS_RT_SIGACTION 13
+#define SYS_RT_SIGPROCMASK 14
+#define SYS_RT_SIGRETURN 15
+
+#define SYS_PWRITE64 18
+#define SYS_READV 19
+#define SYS_WRITEV 20
+#define SYS_PIPE 22
+#define SYS_SELECT 23
+#define SYS_SCHED_YELD 24
+#define SYS_MREMAP 25
+#define SYS_MSYNC 26
+#define SYS_MINCORE 27
+#define SYS_MADVISE 28
+#define SYS_SHMGET 29
+#define SYS_SHMAT 30
+#define SYS_SHMCTL 31
+#define SYS_PAUSE 34
+#define SYS_NANOSLEEP 35
+#define SYS_GETITIMER 36
+#define SYS_ALARM 37
+#define SYS_SETITEMER 38
+#define SYS_SENDFILE 40
+#define SYS_SENDTO 44
+#define SYS_RECVFROM 45
+#define SYS_SENDMSG 46
+#define SYS_RECVMSG 47
+#endif
+
+#endif
+
+#ifdef _WIN32
+
+// eww windows D:
+
+
+#endif

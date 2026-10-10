@@ -1,0 +1,5 @@
+/*
+* Vuoto apposta: le costanti di wrapper/linux/mem servono per chiamare
+* mmap con un asminline, che su Windows non c'e' (la memoria passa da
+* VirtualAlloc, vedi wrapper/windows/systhread).
+*/

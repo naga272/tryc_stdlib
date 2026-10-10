@@ -1,0 +1,547 @@
+
+#ifdef __aarch64__
+// aarch64 non ha fork e vfork: sys_fork e sys_vfork usano clone
+#define SYS_EXECVE 221
+#define SYS_EXIT 93
+#define SYS_WAIT4 260
+#define SYS_KILL 129
+#define SYS_PRCTL 167
+#define SYS_GETPID 172
+#define SYS_GETUID 174
+#define SYS_GETGID 176
+#define SYS_GETEUID 175
+#define SYS_GETEGID 177
+#define SYS_GETPPID 173
+
+#ifndef SYS_CLONE
+#define SYS_CLONE 220
+#endif
+#else
+#define SYS_FORK 57
+#define SYS_VFORK 58
+#define SYS_EXECVE 59
+#define SYS_EXIT 60
+#define SYS_WAIT4 61
+#define SYS_KILL 62
+#define SYS_PRCTL 157
+#define SYS_GETPID 39
+#define SYS_GETUID 102
+#define SYS_GETGID 104
+#define SYS_GETEUID 107
+#define SYS_GETEGID 108
+#define SYS_GETPPID 110
+#endif
+
+#ifndef SIGHUP
+/* Hangup (controllo terminale chiuso) */
+#define SIGHUP	    1
+#endif
+
+#ifndef SIGINT
+/* Interruzione (Ctrl+C) */
+#define SIGINT	    2
+#endif
+
+#ifndef SIGQUIT
+/* Uscita (Ctrl+\) */
+#define SIGQUIT	    3
+#endif
+
+#ifndef SIGILL
+/* Istruzione illegale */
+#define SIGILL	    4
+#endif
+
+#ifndef SIGTRAP
+/* Trap (trappola) */
+#define SIGTRAP	    5
+#endif
+
+#ifndef SIGABRT
+/* Aborto */
+#define SIGABRT	    6
+#endif
+
+#ifndef SIGBUS
+/* Errore di bus */
+#define SIGBUS	    7
+#endif
+
+#ifndef SIGFPE
+/* Eccezione in virgola mobile */
+#define SIGFPE	    8
+#endif
+
+#ifndef PR_SET_PDEATHSIG
+#define PR_SET_PDEATHSIG 1
+#endif
+
+#ifndef SIGKILL
+/* Terminazione forzata, non catturabile */
+#define SIGKILL     9
+#endif
+
+#ifndef SIGUSR1
+/* Segnale utente definito dall’applicazione */
+#define SIGUSR1     10
+#endif
+
+#ifndef SIGSEGV
+/* Violazione di segmentazione */
+#define SIGSEGV	    11
+#endif
+
+#ifndef SIGUSR2
+/* Altro segnale utente definito dall’applicazione */
+#define SIGUSR2     12
+#endif
+
+#ifndef SIGPIPE
+/* Pipe rotta */
+#define SIGPIPE	    13
+#endif
+
+#ifndef SIGALRM
+/* Timer scaduto */
+#define SIGALRM	    14
+#endif
+
+#ifndef SIGTERM
+/* Terminazione richiesta */
+#define SIGTERM     15
+#endif
+
+#ifndef SIGSTKFLT
+/* Errore di stack sul coprocessore */
+#define SIGSTKFLT	16
+#endif
+
+#ifndef SIGCHLD
+/* Il figlio è terminato */
+#define SIGCHLD     17
+#endif
+
+#ifndef SIGCONT
+/* Continua l'esecuzione */
+#define SIGCONT	    18
+#endif
+
+#ifndef SIGSTOP
+/* Ferma l'esecuzione (non catturabile) */
+#define SIGSTOP	    19
+#endif
+
+#ifndef SIGTSTP
+/* Ferma l'esecuzione (Ctrl+Z) */
+#define SIGTSTP	    20
+#endif
+
+#ifndef SIGTTIN
+/* Lettura in background da terminale */
+#define SIGTTIN	    21
+#endif
+
+#ifndef SIGTTOU
+/* Scrittura in background su terminale */
+#define SIGTTOU	    22
+#endif
+
+#ifndef SIGURG
+/* Dati urgenti disponibili su socket */
+#define SIGURG	    23
+#endif
+
+#ifndef SIGXCPU
+/* Limite di tempo CPU superato */
+#define SIGXCPU	    24
+#endif
+
+#ifndef SIGXFSZ
+/* Limite di dimensione file superato */
+#define SIGXFSZ	    25
+#endif
+
+#ifndef SIGVTALRM
+/* Timer virtuale scaduto */
+#define SIGVTALRM	26
+#endif
+
+#ifndef SIGPROF
+/* Timer di profiling scaduto */
+#define SIGPROF	    27
+#endif
+
+#ifndef SIGWINCH
+/* Cambio di dimensione finestra terminale */
+#define SIGWINCH	28
+#endif
+
+#ifndef SIGPOLL
+/* Evento pollable */
+#define SIGPOLL	    29
+#endif
+
+#ifndef SIGIO
+/* I/O ora possibile */
+#define SIGIO	    29
+#endif
+
+#ifndef SIGPWR
+/* Guasto di alimentazione */
+#define SIGPWR	    30
+#endif
+
+#ifndef SIGSYS
+/* Chiamata di sistema non valida */
+#define SIGSYS	    31
+#endif
+
+#ifndef CHILD_STACK_SIZE
+/* stack per il figlio */
+#define CHILD_STACK_SIZE (16 * 1024)
+#endif
+
+#ifndef ECHILD
+/* error child */
+#define ECHILD -10
+#endif
+
+#ifndef ESRCH
+/* nessun processo con quel pid */
+#define ESRCH -3
+#endif
+
+#ifndef WNOHANG
+// wait4/waitpid: non bloccare se nessun figlio e' gia' terminato
+// ritorna subito con 0 invece di aspettare
+#define WNOHANG 1
+#endif
+
+
+def get_pid() -> int:
+    /*
+    * Restituisce il pid del processo (syscall getpid).
+    * return: il pid
+    */
+#ifdef __aarch64__
+    asminline(
+        mov x8, SYS_GETPID
+        svc #0
+    ) endasm
+#else
+    asminline(
+        mov rax, SYS_GETPID
+        syscall
+    ) endasm
+#endif
+
+
+def get_ppid() -> int:
+    /*
+    * Restituisce il pid del processo padre (syscall getppid).
+    * return: il pid del padre
+    */
+#ifdef __aarch64__
+    asminline(
+        mov x8, SYS_GETPPID
+        svc #0
+    ) endasm
+#else
+    asminline(
+        mov rax, SYS_GETPPID
+        syscall
+    ) endasm
+#endif
+
+
+def get_uid() -> int:
+    /*
+    * Restituisce l'utente reale del processo (syscall getuid).
+    * return: lo uid
+    */
+#ifdef __aarch64__
+    asminline(
+        mov x8, SYS_GETUID
+        svc #0
+    ) endasm
+#else
+    asminline(
+        mov rax, SYS_GETUID
+        syscall
+    ) endasm
+#endif
+
+
+def get_euid() -> int:
+    /*
+    * Restituisce l'utente effettivo del processo, quello che vale per i
+    * permessi (syscall geteuid).
+    * return: lo uid effettivo
+    */
+#ifdef __aarch64__
+    asminline(
+        mov x8, SYS_GETEUID
+        svc #0
+    ) endasm
+#else
+    asminline(
+        mov rax, SYS_GETEUID
+        syscall
+    ) endasm
+#endif
+
+
+def get_gid() -> int:
+    /*
+    * Restituisce il gruppo reale del processo (syscall getgid).
+    * return: il gid
+    */
+#ifdef __aarch64__
+    asminline(
+        mov x8, SYS_GETGID
+        svc #0
+    ) endasm
+#else
+    asminline(
+        mov rax, SYS_GETGID
+        syscall
+    ) endasm
+#endif
+
+
+def get_egid() -> int:
+    /*
+    * Restituisce il gruppo effettivo del processo (syscall getegid).
+    * return: il gid effettivo
+    */
+#ifdef __aarch64__
+    asminline(
+        mov x8, SYS_GETEGID
+        svc #0
+    ) endasm
+#else
+    asminline(
+        mov rax, SYS_GETEGID
+        syscall
+    ) endasm
+#endif
+
+
+def sys_fork() -> int:
+    /*
+    * Crea un processo figlio, copia del chiamante (syscall fork).
+    * return: il pid del figlio nel padre, 0 nel figlio, negativo in caso di
+    *   errore
+    */
+#ifdef __aarch64__
+    asminline(
+        mov x0, SIGCHLD
+        mov x1, 0
+        mov x2, 0
+        mov x3, 0
+        mov x4, 0
+        mov x8, SYS_CLONE
+        svc #0
+    ) endasm
+#else
+    asminline(
+        mov rax, SYS_FORK
+        syscall
+    ) endasm
+#endif
+
+
+def sys_kill(pid: int, sig: int) -> int:
+    /*
+    * Manda un segnale a un processo (syscall kill).
+    * argomenti:
+    *   pid: il processo
+    *   sig: il segnale, es. SIGTERM
+    * return: 0 se riuscita, negativo in caso di errore
+    */
+#ifdef __aarch64__
+    asminline(
+        mov x8, SYS_KILL
+        svc #0
+    ) endasm
+#else
+    asminline(
+        mov rax, SYS_KILL
+        syscall
+    ) endasm
+#endif
+
+
+def sys_prctl(option: int, arg2: long) -> int:
+    /*
+    * Chiama prctl con un solo argomento, gli altri a 0: es.
+    * sys_prctl(PR_SET_PDEATHSIG, SIGTERM) fa ricevere SIGTERM al processo
+    * quando il padre termina.
+    * argomenti:
+    *   option: l'operazione, PR_*
+    *   arg2: il suo argomento
+    * return: 0 se riuscita, negativo in caso di errore
+    */
+#ifdef __aarch64__
+    asminline(
+        mov x2, xzr
+        mov x3, xzr
+        mov x4, xzr
+        mov x8, SYS_PRCTL
+        svc #0
+    ) endasm
+#else
+    asminline(
+        xor rdx, rdx
+        xor r10, r10
+        xor r8, r8
+        mov rax, SYS_PRCTL
+        syscall
+    ) endasm
+#endif
+
+
+def sys_vfork() -> int:
+    /*
+    * Crea un processo figlio che condivide la memoria del padre, fermo
+    * finche' il figlio non chiama execve o esce (syscall vfork).
+    * return: il pid del figlio nel padre, 0 nel figlio, negativo in caso di
+    *   errore
+    */
+#ifdef __aarch64__
+    asminline(
+        mov x0, 16657
+        mov x1, 0
+        mov x2, 0
+        mov x3, 0
+        mov x4, 0
+        mov x8, SYS_CLONE
+        svc #0
+    ) endasm
+#else
+    asminline(
+        mov rax, SYS_VFORK
+        syscall
+    )endasm
+#endif
+
+
+def sys_execve(path_name: str, argv: str, envp: str) -> int:
+    /*
+    * Sostituisce il programma del processo con path_name (syscall execve):
+    * se riesce non ritorna.
+    * argomenti:
+    *   path_name: il percorso dell'eseguibile, non cercato nel PATH
+    *   argv: l'array degli argomenti, terminato da 0; argv[0] e' di solito
+    *     il nome del programma
+    *   envp: l'array dell'ambiente, terminato da 0
+    * return: negativo in caso di errore
+    */
+#ifdef __aarch64__
+    asminline(
+        mov x8, SYS_EXECVE
+        svc #0
+    ) endasm
+#else
+    asminline(
+        mov rax, SYS_EXECVE
+        syscall
+    ) endasm
+#endif
+
+
+def sys_wait4(pid: int, wstatus: &int, options: int, rusage: long) -> int:
+    /*
+    * Aspetta che un figlio termini (syscall wait4).
+    * argomenti:
+    *   pid: il figlio, -1 per uno qualunque
+    *   wstatus: dove scrivere lo stato di uscita (vedi wait_for_pid)
+    *   options: 0 per aspettare, WNOHANG per non bloccare
+    *   rusage: dove scrivere le statistiche d'uso (struct rusage), 0 se non
+    *     servono
+    * return: il pid del figlio, 0 con WNOHANG se nessuno e' terminato,
+    *   negativo in caso di errore
+    */
+#ifdef __aarch64__
+    asminline(
+        mov x8, SYS_WAIT4
+        svc #0
+    ) endasm
+#else
+    asminline(
+        mov r10, rcx
+        mov rax, SYS_WAIT4
+        syscall
+    ) endasm
+#endif
+
+
+def exec_shell(cmd: str) -> int:
+    /*
+    * Sostituisce il processo con '/bin/sh -c cmd'.
+    * argomenti:
+    *   cmd: il comando, es. "sudo apt install -y nasm"
+    * return: negativo in caso di errore; se riesce non ritorna
+    */
+    raw = rt_alloc_up(32)
+    unsafe:
+        argv = raw as ptr str
+    argv[0] = "/bin/sh"
+    argv[1] = "-c"
+    argv[2] = cmd
+    argv[3] = 0 as str
+
+    return sys_execve("/bin/sh", raw, raw_envp())
+
+
+def wait_for_pid(pid: int) -> int:
+    /*
+    * Aspetta che un figlio termini.
+    * argomenti:
+    *   pid: il figlio, restituito da sys_fork
+    * return: il suo exit code (0-255), -1 se wait4 fallisce
+    */
+    wstatus = 0
+    result = sys_wait4(pid, &wstatus, 0, 0)
+    if result < 0:
+        return -1
+    return wstatus >> 8
+
+
+def reap_zombie_children() -> int:
+    /*
+    * Raccoglie, senza bloccare, i figli gia' terminati, che altrimenti
+    * resterebbero zombie: serve a un server che fa un fork per connessione.
+    * return: quanti figli ha raccolto
+    */
+    count = 0
+    wstatus = 0
+    while 1:
+        pid = sys_wait4(-1, &wstatus, WNOHANG, 0)
+        if pid <= 0:
+            break
+        count++
+    return count
+
+
+def system(command: str) -> int:
+    /*
+    * Esegue un comando con '/bin/sh -c' e aspetta che finisca, come system()
+    * del C.
+    * argomenti:
+    *   command: il comando
+    * return: l'exit code del comando (0-255, 127 se la shell non parte),
+    *   negativo se il fork fallisce
+    */
+    child_pid = sys_fork()
+
+    if child_pid < 0:
+        print("system: fork fallita (" + itoa(child_pid) + ")\n")
+        return -1
+
+    if child_pid == 0:
+        exec_shell(command)
+        print("system: impossibile eseguire '" + command + "'\n")
+        exit(127)
+
+    return wait_for_pid(child_pid)

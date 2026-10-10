@@ -1,0 +1,62 @@
+/*
+* Linux: le finestre di libstd/window con Xlib (libstd/xlib). La X della
+* finestra arriva come ClientMessage (xlib_catch_close): window_poll
+* distrugge la finestra e da li' ritorna 0, come fa Windows.
+*/
+
+#include <libstd/xlib>
+
+
+// l'ultima finestra chiusa con la X, gia' distrutta da window_poll
+syswindow_closed = 0 as long
+
+
+def window_open(title: str, width: int, height: int) -> (long, long):
+    /*
+    * Apre una finestra di dimensione fissa, che segnala la X come evento.
+    * argomenti:
+    *   title: il titolo
+    *   width, height: la dimensione in pixel
+    * return: (display, window)
+    */
+    display, window = xlib_open_window(title, width, height)
+    xlib_catch_close(display, window)
+    return display, window
+
+
+def window_poll(display: long, window: long) -> int:
+    /*
+    * Smaltisce gli eventi in coda; se e' stata premuta la X distrugge la
+    * finestra.
+    * argomenti:
+    *   display, window: quelli di window_open
+    * return: 1 se la finestra e' aperta, 0 se e' stata chiusa
+    */
+    if window == syswindow_closed:
+        return 0
+
+    wm_delete = XInternAtom(display, "WM_DELETE_WINDOW", 0)
+    ev = new XEvent()
+    while XPending(display) > 0:
+        XNextEvent(display, ev)
+        if ev.window == window and xlib_is_close_request(ev, wm_delete) == 1:
+            XDestroyWindow(display, window)
+            XFlush(display)
+            syswindow_closed = window
+
+    if window == syswindow_closed:
+        return 0
+    return 1
+
+
+def window_close(display: long, window: long) -> None:
+    /*
+    * Chiude la finestra, se non e' gia' stata chiusa con la X, e la
+    * connessione al server X.
+    * argomenti:
+    *   display, window: quelli di window_open
+    * return: nessuno (procedura)
+    */
+    if window != syswindow_closed:
+        XDestroyWindow(display, window)
+    XCloseDisplay(display)

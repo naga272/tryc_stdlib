@@ -1,0 +1,80 @@
+/*
+* Windows x64: strlen, strlen_c e memcpy sul runtime.
+* I parametri arrivano nei registri degli
+* asminline (rdi, rsi, rdx) e il runtime li vuole in quelli di Win64
+* (rcx, rdx, r8), con lo stack allineato a 16 e 32 byte riservati per lui.
+* rbx tiene lo stack di prima: lo conserva anche il runtime.
+*/
+
+
+def strlen(stringa: str) -> long:
+    /*
+    * Calcola la lunghezza di una stringa.
+    * argomenti:
+    *   stringa: la stringa
+    * return: il numero di caratteri prima del terminatore
+    */
+    asminline (
+        cmp dword [rdi - 8], 0xD5545253
+        jne .scan
+        mov rax, qword [rdi - 16]
+        cmp rax, 0x7FFFFFFE
+        ja .scan
+        jmp .done
+        .scan:
+            push rbx
+            mov rbx, rsp
+            and rsp, -16
+            sub rsp, 32
+            mov rcx, rdi
+            call rt_strlen_scan
+            mov rsp, rbx
+            pop rbx
+        .done:
+    ) endasm
+
+
+def strlen_c(p: ptr char) -> long:
+    /*
+    * Calcola la lunghezza di una stringa C (char*, es. restituita da una
+    * funzione extern), che non ha l'header delle str di TryC: conta i
+    * caratteri fino al terminatore.
+    * argomenti:
+    *   p: la stringa
+    * return: il numero di caratteri prima del terminatore
+    */
+    asminline (
+        push rbx
+        mov rbx, rsp
+        and rsp, -16
+        sub rsp, 32
+        mov rcx, rdi
+        call rt_strlen_scan
+        mov rsp, rbx
+        pop rbx
+    ) endasm
+
+
+def memcpy(dest: str, src: str, n: long) -> None:
+    /*
+    * Copia n byte da src a dest; le due zone non devono sovrapporsi. Con n
+    * minore di 16 copia comunque 16 byte: dest e src devono avere quel
+    * margine, come ogni allocazione di TryC.
+    * argomenti:
+    *   dest: il buffer di destinazione
+    *   src: il buffer sorgente
+    *   n: quanti byte copiare
+    * return: nessuno (procedura)
+    */
+    asminline(
+        push rbx
+        mov rbx, rsp
+        and rsp, -16
+        sub rsp, 32
+        mov r8, rdx
+        mov rdx, rsi
+        mov rcx, rdi
+        call rt_simd_memcpy
+        mov rsp, rbx
+        pop rbx
+    ) endasm

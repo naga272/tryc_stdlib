@@ -1,0 +1,185 @@
+#include <libstd/macro>
+#include <libstd/string>
+#include <libstd/list>
+
+#ifdef __unix__
+#include <libstd/wrapper/linux/stdio>
+#else
+#include <libstd/wrapper/windows/stdio>
+#endif
+
+
+#define INPUT_BUFFER_SIZE 4096
+
+
+class InputBuffer --no-padding:
+    buf str
+    len int
+    pos int
+    eof int
+
+
+def input_buffer_new() -> InputBuffer:
+    /*
+    * Crea un buffer di lettura vuoto, di INPUT_BUFFER_SIZE byte, per
+    * input_buffered, input e readline.
+    * return: il buffer
+    */
+    ib = new InputBuffer()
+    ib.buf = rt_alloc_up(INPUT_BUFFER_SIZE)
+    ib.len = 0
+    ib.pos = 0
+    ib.eof = 0
+    return ib
+
+
+def input_buffered(ib: InputBuffer, fd: int) -> char:
+    /*
+    * Legge il prossimo carattere da un file descriptor attraverso il buffer:
+    * la sys_read avviene solo quando il buffer e' vuoto.
+    * argomenti:
+    *   ib: il buffer, creato con input_buffer_new
+    *   fd: il file descriptor
+    * return: il carattere, '\0' alla fine del file o su errore (allora
+    *   ib.eof diventa 1)
+    */
+    if ib.pos >= ib.len:
+        n = sys_read(fd, ib.buf, INPUT_BUFFER_SIZE)
+
+        if n <= 0:
+            ib.eof = 1
+            return '\0'
+
+        ib.len = n
+        ib.pos = 0
+
+    c = ib.buf[ib.pos]
+    ib.pos = ib.pos + 1
+    return c
+
+
+def at_eof(ib: InputBuffer) -> int:
+    /*
+    * Controlla se l'ultima lettura da ib ha trovato la fine del file o un
+    * errore. Dopo un input o un readline che ha dato "" distingue una riga
+    * vuota dalla fine del file.
+    * argomenti:
+    *   ib: il buffer
+    * return: 1 alla fine del file, 0 altrimenti
+    */
+    return ib.eof
+
+
+def input(ib: InputBuffer) -> str:
+    /*
+    * Legge una riga da standard input, senza il '\n' finale (ne' un '\r'
+    * prima di esso). Una riga di piu' di INPUT_BUFFER_SIZE - 1 caratteri
+    * continua nella lettura successiva.
+    * argomenti:
+    *   ib: il buffer, creato con input_buffer_new
+    * return: la riga, "" per una riga vuota o alla fine del file (at_eof
+    *   distingue i due casi)
+    */
+    line = rt_alloc_up(INPUT_BUFFER_SIZE)
+    i = 0
+    while i < INPUT_BUFFER_SIZE - 1:
+        c = input_buffered(ib, 0)
+        if c == '\0':
+            break
+
+        if c == '\n':
+            break
+
+        line[i] = c
+        i++
+
+    if i > 0 and line[i - 1] == '\r':
+        i--
+
+    line[i] = '\0'
+    rt_str_seal(line, i)
+    return line
+
+
+def readline(ib: InputBuffer, fd: int) -> str:
+    /*
+    * Legge una riga da un file descriptor, senza il '\n' finale (ne' un
+    * '\r' prima di esso, come nei file di Windows). Una riga di piu' di
+    * INPUT_BUFFER_SIZE - 1 caratteri continua nella lettura successiva.
+    * argomenti:
+    *   ib: il buffer, creato con input_buffer_new
+    *   fd: il file descriptor
+    * return: la riga, "" per una riga vuota o alla fine del file (at_eof
+    *   distingue i due casi)
+    */
+    line = rt_alloc_up(INPUT_BUFFER_SIZE)
+    i = 0
+
+    while i < INPUT_BUFFER_SIZE - 1:
+        c = input_buffered(ib, fd)
+        if c == '\0':
+            break
+        if c == '\n':
+            break
+        line[i] = c
+        i++
+
+    if i > 0 and line[i - 1] == '\r':
+        i--
+
+    line[i] = '\0'
+    rt_str_seal(line, i)
+    return line
+
+
+def fprint(fd: int, stringa: str) -> long:
+    /*
+    * Scrive un testo su un file descriptor.
+    * argomenti:
+    *   fd: il file descriptor (1 standard output, 2 standard error)
+    *   stringa: il testo
+    * return: i byte scritti, negativo su errore
+    */
+    len_str = strlen(stringa)
+    num_char_printed = sys_write(fd, stringa, len_str)
+    return num_char_printed
+
+
+def freadc(fd: int) -> int:
+    /*
+    * Legge un byte da un file descriptor.
+    * argomenti:
+    *   fd: il file descriptor
+    * return: il byte, da 0 a 255, -1 alla fine del file o su errore
+    */
+    buf = rt_alloc_up(1)
+    n = sys_read(fd, buf, 1)
+    if n <= 0:
+        return -1
+    return char_to_int(buf[0])
+
+
+def print(*args) -> None:
+    /*
+    * Stampa gli argomenti su standard output, uno dopo l'altro e senza
+    * separatori: str, int, long, float (con sei decimali) e char (come
+    * carattere). Un oggetto o un array stampa il suo indirizzo.
+    * argomenti:
+    *   args: i valori da stampare
+    * return: nessuno (procedura)
+    */
+    __print_n = list_length(args)
+    __print_i = 0 as long
+    while __print_i < __print_n:
+        __print_v = list_get(args, __print_i) as Vararg
+        if __print_v.tag == 0:
+            fprint(1, __print_v.rpayload as str)
+        elif __print_v.tag == 4:
+            fprint(1, ftoa(__print_v.fpayload))
+        elif __print_v.tag == 3:
+            __print_c = int_to_char(long_to_int(__print_v.payload))
+            unsafe:
+                sys_write(1, &__print_c as str, 1)
+        else:
+            fprint(1, itoa(__print_v.payload))
+        __print_i = __print_i + 1 as long

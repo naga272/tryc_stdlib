@@ -1,0 +1,164 @@
+#include <libstd/string>
+#include <libstd/file>
+
+/*
+*   Standard library per interagire col sistema operativo:
+*   - argomenti da riga di comando
+*   - variabili d'ambiente
+*   - informazioni del processo
+*   - directory di lavoro
+*   - informazioni sul sistema
+*   - (uname) e gestore di pacchetti disponibile
+*
+*   argc/argv/envp sono catturati una volta sola all'avvio del
+*   processo se non e' stato passato il flag,
+*   leggendo lo stack cosi' come lo lascia il kernel subito dopo l'exec.
+*/
+
+
+#ifdef __unix__
+#include <libstd/wrapper/linux/sysos>
+#else
+#include <libstd/wrapper/windows/sysos>
+#endif
+
+def sysinfo(sysinfo_i: SysInfo) -> int:
+    /*
+    * Riempie sysinfo_i con le statistiche del sistema (memoria, uptime,
+    * processi). Su errore stampa un messaggio e termina il programma.
+    * argomenti:
+    *   sysinfo_i: la struttura da riempire
+    * return: 0
+    */
+    response = sys_sysinfo(sysinfo_i)
+    if response != 0:
+        print("error to call sys_info()")
+        exit(1)
+
+    return response
+
+
+def arg_count() -> int:
+    /*
+    * Restituisce il numero di argomenti della riga di comando.
+    * return: il numero di argomenti, compreso il nome del programma
+    */
+#ifdef __aarch64__
+    asminline(
+        adrp x9, argc
+        ldr x0, [x9, :lo12:argc]
+    ) endasm
+#else
+    asminline(
+        mov rax, [argc]
+    ) endasm
+#endif
+
+
+def os_name() -> str:
+    /*
+    * Restituisce il nome del sistema operativo (sysname di uname, es.
+    * "Linux").
+    * return: il nome
+    */
+    return uname_field(UTSNAME_OFF_SYSNAME)
+
+
+def hostname() -> str:
+    /*
+    * Restituisce il nome host della macchina (nodename di uname).
+    * return: il nome host
+    */
+    return uname_field(UTSNAME_OFF_NODENAME)
+
+
+def os_release() -> str:
+    /*
+    * Restituisce la release del sistema operativo (release di uname, es.
+    * "6.1.0-kali9-amd64").
+    * return: la release
+    */
+    return uname_field(UTSNAME_OFF_RELEASE)
+
+
+def kernel_version() -> str:
+    /*
+    * Restituisce la versione del kernel, con la data di build (version di
+    * uname).
+    * return: la versione
+    */
+    return uname_field(UTSNAME_OFF_VERSION)
+
+
+def machine_arch() -> str:
+    /*
+    * Restituisce l'architettura della macchina (machine di uname, es.
+    * "x86_64").
+    * return: l'architettura
+    */
+    return uname_field(UTSNAME_OFF_MACHINE)
+
+
+def run_capture(cmd: str) -> str:
+    /*
+    * Esegue un comando con '/bin/sh -c' e ne raccoglie lo standard output,
+    * come subprocess.run(...).stdout di Python.
+    * argomenti:
+    *   cmd: il comando
+    * return: l'output del comando, "" se il comando non parte
+    */
+    fds = rt_alloc_up(8)
+    if sys_pipe(fds) < 0:
+        return ""
+
+    unsafe:
+        fd = fds as ptr int
+
+    rd = fd[0]
+    wr = fd[1]
+    pid = sys_fork()
+
+    if pid < 0:
+        return ""
+
+    if pid == 0:
+        sys_dup2(wr, 1)
+        sys_close(rd)
+        sys_close(wr)
+        exec_shell(cmd)
+        exit(127)
+
+    sys_close(wr)
+    out = ""
+    buf = rt_alloc_up(4097)
+    n = sys_read(rd, buf, 4096)
+
+    while n > 0:
+        buf[n] = '\0'
+        out = out + buf
+        n = sys_read(rd, buf, 4096)
+
+    sys_close(rd)
+    wait_for_pid(pid)
+    return out
+
+
+def abs_path_node_exe() -> str:
+    /*
+    * Restituisce la cartella che contiene il programma in esecuzione, con
+    * il separatore finale. Se non la trova stampa un messaggio e termina il
+    * programma.
+    * return: il percorso assoluto della cartella
+    */
+    abs_path = exe_path()
+#ifndef __unix__
+    pos = rfind(abs_path, '\\')
+#else
+    pos = rfind(abs_path, '/')
+#endif
+
+    if pos <= 0:
+        print("error in abs_path_node_exe()" + abs_path)
+        exit(1)
+
+    return get_chars_in_range(abs_path, 0, pos + 1)

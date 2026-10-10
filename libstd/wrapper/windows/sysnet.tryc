@@ -1,0 +1,331 @@
+libextern <ws2_32.dll>
+
+#include <libstd/wrapper/windows/kernel32>
+
+
+/*
+* Windows x64: le sys_* delle socket di wrapper/linux/sysnet con Winsock
+* (ws2_32.dll). Una socket e' un fd come un file (vedi SOCKET) e gli
+* errori tornano come -WSAGetLastError().
+*/
+
+#ifndef SOCKET
+// un fd come un file: l'HANDLE della socket troncato a 32 bit (vedi
+// wrapper/windows/kernel32), cosi' sys_write, sys_read e sys_close vanno
+// anche sulle socket. A Winsock torna esteso col segno, come long.
+#define SOCKET int
+#endif
+
+
+// socket, bind, listen, accept e connect di Winsock hanno lo stesso nome
+// delle funzioni di libstd/net: niente extern def, le sys_* qui sotto le
+// chiamano dal loro indirizzo (winsock_fn)
+
+extern def closesocket(s: long) -> int
+extern def shutdown(s: long, how: int) -> int
+
+
+// Winsock va avviato prima di qualunque altra sua chiamata (versione 2.2):
+// lo fa l'include stesso, all'avvio del programma
+#define WSA_VERSION_2_2 514
+#define WSADATA_SIZE 408
+
+extern def WSAStartup(version: int, data: str) -> int
+extern def WSAGetLastError() -> int
+
+WSAStartup(WSA_VERSION_2_2, rt_alloc_up(WSADATA_SIZE))
+
+
+/* ==== le sys_* delle socket di wrapper/linux/sysnet ==== */
+
+def winsock_result(response: int) -> int:
+    /*
+    * Traduce il risultato di una funzione di Winsock: 0 se riuscita,
+    * altrimenti -WSAGetLastError(), come -errno su Linux.
+    * argomenti:
+    *   response: il valore restituito, 0 se riuscita
+    * return: 0 o -WSAGetLastError()
+    */
+    if response != 0:
+        return 0 - WSAGetLastError()
+    return 0
+
+
+def sys_socket(ip_family: int, sock_type: int, protocol: int) -> SOCKET:
+    /*
+    * Crea una socket con socket di Winsock, come in wrapper/linux/sysnet.
+    * argomenti:
+    *   ip_family: la famiglia di indirizzi, es. AF_INET
+    *   sock_type: il tipo, es. SOCK_STREAM o SOCK_DGRAM
+    *   protocol: il protocollo, 0 per quello del tipo
+    * return: la socket, -WSAGetLastError() in caso di errore
+    */
+    unsafe:
+        ws_socket = winsock_fn("socket") as &(int, int, int) -> int
+    sock = ws_socket(ip_family, sock_type, protocol)
+    if sock == -1:
+        return 0 - WSAGetLastError()
+    return sock
+
+
+def sys_connect(sockfd: SOCKET, sockaddr: Sockaddr_in) -> int:
+    /*
+    * Connette una socket a un indirizzo IPv4, con connect di Winsock.
+    * argomenti:
+    *   sockfd: la socket
+    *   sockaddr: l'indirizzo
+    * return: 0, -WSAGetLastError() in caso di errore
+    */
+    unsafe:
+        ws_connect = winsock_fn("connect") as &(long, long, int) -> int
+        addr = sockaddr as long
+    return winsock_result(ws_connect(sockfd, addr, 16))
+
+
+def sys_bind(fd_sock: SOCKET, addr: Sockaddr_in) -> int:
+    /*
+    * Lega una socket a un indirizzo IPv4 e a una porta, con bind di Winsock.
+    * argomenti:
+    *   fd_sock: la socket
+    *   addr: l'indirizzo
+    * return: 0, -WSAGetLastError() in caso di errore
+    */
+    unsafe:
+        ws_bind = winsock_fn("bind") as &(long, long, int) -> int
+        addr_ptr = addr as long
+    return winsock_result(ws_bind(fd_sock, addr_ptr, 16))
+
+
+def sys_listen(fd_sock: SOCKET, size_queue: int) -> int:
+    /*
+    * Mette una socket in ascolto, con listen di Winsock.
+    * argomenti:
+    *   fd_sock: la socket
+    *   size_queue: quante connessioni possono aspettare in coda
+    * return: 0, -WSAGetLastError() in caso di errore
+    */
+    unsafe:
+        ws_listen = winsock_fn("listen") as &(long, int) -> int
+    return winsock_result(ws_listen(fd_sock, size_queue))
+
+
+def sys_accept(fd_sock: SOCKET, addr: Sockaddr_in, len_sockaddr_in: &int) -> SOCKET:
+    /*
+    * Accetta una connessione e scrive in addr l'indirizzo del client, con
+    * accept di Winsock.
+    * argomenti:
+    *   fd_sock: la socket in ascolto
+    *   addr: dove scrivere l'indirizzo del client
+    *   len_sockaddr_in: un int con la dimensione di addr (16), in cui Winsock
+    *     scrive quella usata
+    * return: la socket del client, -WSAGetLastError() in caso di errore
+    */
+    unsafe:
+        ws_accept = winsock_fn("accept") as &(long, long, long) -> int
+        addr_ptr = addr as long
+        len_ptr = len_sockaddr_in as long
+    sock = ws_accept(fd_sock, addr_ptr, len_ptr)
+    if sock == -1:
+        return 0 - WSAGetLastError()
+    return sock
+
+
+def sys_shutdown(fd: SOCKET, how: int) -> None:
+    /*
+    * Chiude la connessione di una socket in lettura, in scrittura o in
+    * entrambe, come in wrapper/linux/sysfile.
+    * argomenti:
+    *   fd: la socket
+    *   how: SHUT_RD, SHUT_WR o SHUT_RDWR
+    * return: nessuno (procedura)
+    */
+    shutdown(fd, how)
+
+
+/* ==== opzioni di setsockopt: i numeri di Windows ====
+* (winsock2.h, ws2ipdef.h). Stessi nomi di wrapper/linux/sysnet, tranne
+* SO_REUSEPORT: su Windows non c'e', e ignorarla cambierebbe cosa fa il
+* programma (il secondo bind sulla stessa porta fallirebbe).
+*/
+
+#ifndef SOL_SOCKET1
+#define SOL_SOCKET1 65535       // 0xFFFF
+#endif
+
+#define TCP_MAXSEG 4
+#define TCP_KEEPIDLE 3
+#define TCP_KEEPINTVL 17
+#define TCP_KEEPCNT 16
+
+// su Windows si chiama TCP_MAXRTMS, stesso significato (millisecondi)
+#define TCP_USER_TIMEOUT 14
+
+// solo ottimizzazioni, senza un'opzione equivalente su Windows: valori
+// della libreria (non di Winsock) che sys_setsockopt_n accetta senza
+// fare niente, cosi' lo stesso programma va su tutti e due i sistemi.
+// Il 9 di Linux qui sarebbe TCP_NOSYNRETRIES, un'altra opzione.
+#define TCP_DEFER_ACCEPT -1001      // l'equivalente sarebbe AcceptEx
+#define TCP_CORK -1002
+#define TCP_QUICKACK -1003
+
+#ifndef SO_LINGER
+// quanto close aspetta i dati non ancora spediti (vedi set_linger)
+#define SO_LINGER 128           // 0x0080
+#endif
+
+#ifndef SO_RCVTIMEO
+// timeout di ricezione, qui in millisecondi (vedi set_recv_timeout)
+#define SO_RCVTIMEO 4102        // 0x1006
+#endif
+
+
+extern def setsockopt(s: long, level: int, optname: int, optval: long, optlen: int) -> int
+extern def getsockopt(s: long, level: int, optname: int, optval: long, optlen: &int) -> int
+
+
+def win_sockopt_ignored(level: int, optname: int) -> int:
+    /*
+    * Controlla se un'opzione e' una di quelle senza equivalente su Windows
+    * (TCP_DEFER_ACCEPT, TCP_CORK, TCP_QUICKACK), che si accettano senza fare
+    * nulla.
+    * argomenti:
+    *   level: il livello
+    *   optname: l'opzione
+    * return: 1 se va ignorata, 0 altrimenti
+    */
+    if level != IPPROTO_TCP:
+        return 0
+    if optname == TCP_DEFER_ACCEPT or optname == TCP_CORK or optname == TCP_QUICKACK:
+        return 1
+    return 0
+
+
+def sys_setsockopt_n(sockfd: SOCKET, level: int, optname: int, optval: long, optlen: int) -> int:
+    /*
+    * Imposta un'opzione di una socket con un valore di qualunque dimensione,
+    * con setsockopt di Winsock; le opzioni senza equivalente su Windows
+    * vengono ignorate.
+    * argomenti:
+    *   sockfd: la socket
+    *   level: il livello, es. SOL_SOCKET1
+    *   optname: l'opzione
+    *   optval: l'indirizzo del valore
+    *   optlen: la sua dimensione in byte
+    * return: 0, -WSAGetLastError() in caso di errore
+    */
+    if win_sockopt_ignored(level, optname) != 0:
+        return 0
+    if setsockopt(sockfd, level, optname, optval, optlen) != 0:
+        return 0 - WSAGetLastError()
+    return 0
+
+
+def sys_setsockopt(sockfd: SOCKET, level: int, optname: int, optval: &int) -> int:
+    /*
+    * Imposta un'opzione 'int' di una socket (vedi sys_setsockopt_n).
+    * argomenti:
+    *   sockfd: la socket
+    *   level: il livello
+    *   optname: l'opzione
+    *   optval: il valore, es. &mio_int
+    * return: 0, -WSAGetLastError() in caso di errore
+    */
+    unsafe:
+        return sys_setsockopt_n(sockfd, level, optname, optval as long, 4)
+
+
+def sys_getsockopt_n(sockfd: SOCKET, level: int, optname: int, optval: long, optlen: &int) -> int:
+    /*
+    * Legge un'opzione di una socket, con getsockopt di Winsock; un'opzione
+    * ignorata su Windows si legge sempre a 0.
+    * argomenti:
+    *   sockfd: la socket
+    *   level: il livello, es. SOL_SOCKET1
+    *   optname: l'opzione
+    *   optval: l'indirizzo del buffer per il valore
+    *   optlen: la dimensione del buffer, in cui Winsock scrive quella usata
+    * return: 0, -WSAGetLastError() in caso di errore
+    */
+    if win_sockopt_ignored(level, optname) != 0:
+        unsafe:
+            value = optval as ptr int
+            value[0] = 0
+        return 0
+    if getsockopt(sockfd, level, optname, optval, optlen) != 0:
+        return 0 - WSAGetLastError()
+    return 0
+
+
+def sys_getsockopt(sockfd: SOCKET, level: int, optname: int, optval: &int) -> int:
+    /*
+    * Come sys_getsockopt_n, per un'opzione 'int'.
+    * argomenti:
+    *   sockfd: la socket
+    *   level: il livello
+    *   optname: l'opzione
+    *   optval: dove scrivere il valore
+    * return: 0, -WSAGetLastError() in caso di errore
+    */
+    size = 4
+    unsafe:
+        return sys_getsockopt_n(sockfd, level, optname, optval as long, &size)
+
+
+def set_recv_timeout(sockfd: SOCKET, seconds: long) -> int:
+    /*
+    * Imposta il timeout di ricezione di una socket (SO_RCVTIMEO), come su
+    * Linux; Windows lo vuole in millisecondi, in un DWORD.
+    * argomenti:
+    *   sockfd: la socket
+    *   seconds: i secondi
+    * return: 0, -WSAGetLastError() in caso di errore
+    */
+    ms = seconds * 1000
+    unsafe:
+        return sys_setsockopt_n(sockfd, SOL_SOCKET1, SO_RCVTIMEO, &ms as long, 4)
+
+
+/*
+* class Linger: la struct linger di Winsock, due u_short in 4 byte, quindi
+* qui un solo int: l_onoff nei 16 bit bassi, l_linger in quelli alti. Su
+* Linux sono due int: per usarla uguale sui due sistemi ci sono set_linger
+* e get_linger.
+*/
+class Linger --no-padding:
+    l_onoff_linger int
+
+
+def set_linger(sockfd: SOCKET, onoff: int, seconds: int) -> int:
+    /*
+    * Imposta SO_LINGER come in wrapper/linux/sysnet, con la struct linger di
+    * Winsock.
+    * argomenti:
+    *   sockfd: la socket
+    *   onoff: 1 per attivarlo, 0 per spegnerlo
+    *   seconds: i secondi di attesa
+    * return: 0, -WSAGetLastError() in caso di errore
+    */
+    lg = new Linger()
+    lg.l_onoff_linger = (onoff & 0xffff) | ((seconds & 0xffff) << 16)
+    unsafe:
+        return sys_setsockopt_n(sockfd, SOL_SOCKET1, SO_LINGER, lg as long, 4)
+
+
+def get_linger(sockfd: SOCKET) -> (int, int):
+    /*
+    * Legge SO_LINGER (vedi set_linger).
+    * argomenti:
+    *   sockfd: la socket
+    * return: (1 se attivo o 0, i secondi); (-1, l'errore) in caso di errore
+    */
+    lg = new Linger()
+    size = 4
+    unsafe:
+        response = sys_getsockopt_n(sockfd, SOL_SOCKET1, SO_LINGER, lg as long, &size)
+    if response < 0:
+        return -1, response
+
+    onoff = 0
+    if (lg.l_onoff_linger & 0xffff) != 0:
+        onoff = 1
+    return onoff, (lg.l_onoff_linger >> 16) & 0xffff

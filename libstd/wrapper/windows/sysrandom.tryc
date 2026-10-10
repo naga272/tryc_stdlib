@@ -1,0 +1,25 @@
+/*
+* Windows x64: sys_getrandom di libstd/random con BCryptGenRandom, il
+* generatore di numeri casuali del sistema.
+*/
+
+libextern <bcrypt.dll>
+
+#define BCRYPT_USE_SYSTEM_PREFERRED_RNG 2
+
+extern def BCryptGenRandom(algorithm: long, buf: str, buflen: int, flags: int) -> int
+
+
+def sys_getrandom(buf: str, buflen: int, flags: int) -> int:
+    /*
+    * Riempie un buffer di byte casuali, sempre per intero, con
+    * BCryptGenRandom.
+    * argomenti:
+    *   buf: il buffer
+    *   buflen: quanti byte
+    *   flags: non usato
+    * return: buflen, -1 se BCryptGenRandom fallisce
+    */
+    if BCryptGenRandom(0 as long, buf, buflen, BCRYPT_USE_SYSTEM_PREFERRED_RNG) != 0:
+        return -1
+    return buflen

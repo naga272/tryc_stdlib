@@ -1,0 +1,86 @@
+
+/*
+* Linux: le funzioni di base sulle stringhe, verso il runtime.
+*/
+
+
+def strlen(stringa: str) -> long:
+    /*
+    * Calcola la lunghezza di una stringa.
+    * argomenti:
+    *   stringa: la stringa
+    * return: il numero di caratteri prima del terminatore
+    */
+#ifdef __aarch64__
+    asminline (
+        ldur w9, [x0, -8]
+        movz w10, 0x5253
+        movk w10, 0xD554, lsl 16
+        cmp w9, w10
+        b.ne .scan
+        ldur x9, [x0, -16]
+        movz x10, 0xFFFE
+        movk x10, 0x7FFF, lsl 16
+        cmp x9, x10
+        b.hi .scan
+        mov x0, x9
+        b .done
+        .scan:
+            bl rt_strlen_scan
+        .done:
+    ) endasm
+#else
+    asminline (
+        cmp dword [rdi - 8], 0xD5545253
+        jne .scan
+        mov rax, qword [rdi - 16]
+        cmp rax, 0x7FFFFFFE
+        ja .scan
+        jmp .done
+        .scan:
+            call rt_strlen_scan
+        .done:
+    ) endasm
+#endif
+
+
+def strlen_c(p: ptr char) -> long:
+    /*
+    * Calcola la lunghezza di una stringa C (char*, es. restituita da una
+    * funzione extern), che non ha l'header delle str di TryC: conta i
+    * caratteri fino al terminatore.
+    * argomenti:
+    *   p: la stringa
+    * return: il numero di caratteri prima del terminatore
+    */
+#ifdef __aarch64__
+    asminline(
+        bl rt_strlen_scan
+    ) endasm
+#else
+    asminline (
+        call rt_strlen_scan
+    ) endasm
+#endif
+
+
+def memcpy(dest: str, src: str, n: long) -> None:
+    /*
+    * Copia n byte da src a dest; le due zone non devono sovrapporsi. Con n
+    * minore di 16 copia comunque 16 byte: dest e src devono avere quel
+    * margine, come ogni allocazione di TryC.
+    * argomenti:
+    *   dest: il buffer di destinazione
+    *   src: il buffer sorgente
+    *   n: quanti byte copiare
+    * return: nessuno (procedura)
+    */
+#ifdef __aarch64__
+    asminline(
+        bl rt_simd_memcpy
+    ) endasm
+#else
+    asminline(
+        call rt_simd_memcpy
+    ) endasm
+#endif

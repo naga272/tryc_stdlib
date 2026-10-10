@@ -1,0 +1,880 @@
+// print, per gli errori fatali qui sotto
+#include <libstd/stdio>
+#include <libstd/type>
+#ifdef __unix__
+#include <libstd/wrapper/linux/string>
+#else
+#include <libstd/wrapper/windows/string>
+#endif
+
+
+def str_from_c(p: ptr char) -> str:
+    /*
+    * Copia una stringa C, terminata da NUL (per esempio il char* di una
+    * libreria esterna), in una str di TryC.
+    * argomenti:
+    *   p: la stringa C
+    * return: la copia
+    */
+    n = strlen_c(p)
+    s = rt_alloc_up(n + 1)
+    memcpy(s, p as str, n)
+    s[n] = '\0'
+    rt_str_seal(s, n)
+    return s
+
+
+def isupper(c: char) -> int:
+    /*
+    * Controlla se un carattere e' maiuscolo (A-Z).
+    * argomenti:
+    *   c: carattere da controllare
+    * return: 1 se maiuscolo, 0 altrimenti
+    */
+    val = char_to_int(c)
+    if val < 65:
+        return 0
+    if val > 90:
+        return 0
+    return 1
+
+
+def islower(c: char) -> int:
+    /*
+    * Controlla se un carattere e' minuscolo (a-z).
+    * argomenti:
+    *   c: carattere da controllare
+    * return: 1 se minuscolo, 0 altrimenti
+    */
+    val = char_to_int(c)
+    if val < 97 or val > 122:
+        return 0
+    return 1
+
+
+def isnumeric(c: char) -> int:
+    /*
+    * Controlla se un carattere e' una cifra decimale (0-9).
+    * argomenti:
+    *   c: carattere da controllare
+    * return: 1 se e' una cifra, 0 altrimenti
+    */
+    val = char_to_int(c)
+    if val < 48 or val > 57:
+        return 0
+    return 1
+
+
+def isalpha(c: char) -> int:
+    /*
+    * Controlla se un carattere e' una lettera o una cifra (A-Z, a-z, 0-9).
+    * argomenti:
+    *   c: carattere da controllare
+    * return: 1 se lo e', 0 altrimenti
+    */
+    if isnumeric(c):
+        return 1
+    if islower(c):
+        return 1
+    if isupper(c):
+        return 1
+    return 0
+
+
+def is_all_lower(stringa: str) -> int:
+    /*
+    * Controlla se tutti i caratteri di una stringa sono minuscoli (a-z).
+    * argomenti:
+    *   stringa: stringa da controllare
+    * return: 1 se lo sono tutti (anche per una stringa vuota), 0 altrimenti
+    */
+    for idx = 0 as long; stringa[idx] != '\0'; idx++:
+        if islower(stringa[idx]) == 0:
+            return 0
+    return 1
+
+
+def is_all_upper(stringa: str) -> int:
+    /*
+    * Controlla se tutti i caratteri di una stringa sono maiuscoli (A-Z).
+    * argomenti:
+    *   stringa: stringa da controllare
+    * return: 1 se lo sono tutti (anche per una stringa vuota), 0 altrimenti
+    */
+    for idx = 0 as long; stringa[idx] != '\0'; idx++:
+        if isupper(stringa[idx]) == 0:
+            return 0
+    return 1
+
+
+def strisalnum(stringa: str) -> int:
+    /*
+    * Controlla se tutti i caratteri di una stringa sono lettere o cifre.
+    * argomenti:
+    *   stringa: stringa da controllare
+    * return: 1 se lo sono tutti (anche per una stringa vuota), 0 altrimenti
+    */
+    for idx = 0 as long; stringa[idx] != '\0'; idx++:
+        if isalpha(stringa[idx]) == 0:
+            return 0
+    return 1
+
+
+def strisalalpha(stringa: str) -> int:
+    /*
+    * Controlla se tutti i caratteri di una stringa sono lettere o cifre,
+    * come strisalnum.
+    * argomenti:
+    *   stringa: stringa da controllare
+    * return: 1 se lo sono tutti (anche per una stringa vuota), 0 altrimenti
+    */
+    for idx = 0 as long; stringa[idx] != '\0'; idx++:
+        if isalpha(stringa[idx]) == 0:
+            return 0
+    return 1
+
+
+def findsubstr(stringa: str, substr: str) -> long:
+    /*
+    * Cerca la prima occorrenza di substr in stringa.
+    * argomenti:
+    *   stringa: la stringa in cui cercare
+    *   substr: il testo da cercare
+    * return: l'indice della prima occorrenza, -1 se non c'e'
+    */
+    val = 0 as long
+    while 1:
+        num_char_match = 0 as long
+        while 1:
+            if substr[num_char_match] == '\0':
+                break
+
+            if stringa[val + num_char_match] != substr[num_char_match]:
+                break
+
+            num_char_match++
+
+        if substr[num_char_match] == '\0':
+            return val
+
+        if stringa[val] == '\0':
+            return -1
+        val++
+
+
+def substrget(stringa: str, num_char_to_get: long) -> str:
+    /*
+    * Copia i primi num_char_to_get caratteri di una stringa in una stringa
+    * nuova.
+    * argomenti:
+    *   stringa: la stringa, o un punto al suo interno (s + i)
+    *   num_char_to_get: quanti caratteri copiare
+    * return: la copia
+    */
+    substring = rt_alloc_up(num_char_to_get + 1)
+    memcpy(substring, stringa, num_char_to_get)
+    substring[num_char_to_get] = '\0'
+    rt_str_seal(substring, num_char_to_get)
+    return substring
+
+
+def substrget_nursery(stringa: str, num_char_to_get: long) -> str:
+    /*
+    * Come substrget, ma alloca nella nursery: la usa il compilatore al posto
+    * di substrget quando il risultato non esce dalla funzione chiamante. Non
+    * va chiamata a mano.
+    * argomenti:
+    *   stringa: la stringa
+    *   num_char_to_get: quanti caratteri copiare
+    * return: la copia
+    */
+    substring = rt_nursery_alloc(num_char_to_get + 1)
+    memcpy(substring, stringa, num_char_to_get)
+    substring[num_char_to_get] = '\0'
+    rt_str_seal(substring, num_char_to_get)
+    return substring
+
+
+def char_in_set(c: char, chars: str) -> int:
+    /*
+    * Controlla se un carattere compare in un insieme di caratteri.
+    * argomenti:
+    *   c: il carattere
+    *   chars: l'insieme, come stringa
+    * return: 1 se c'e', 0 altrimenti
+    */
+    for idx = 0 as long; chars[idx] != '\0'; idx++:
+        if chars[idx] == c:
+            return 1
+    return 0
+
+
+def resolve_strip_chars(chars: str) -> str:
+    /*
+    * Restituisce i caratteri da togliere per strip, lstrip e rstrip: ""
+    * vale come lo spazio bianco (spazio, tab, a capo, CR).
+    * argomenti:
+    *   chars: i caratteri, "" per lo spazio bianco
+    * return: chars, oppure " \t\n\r" se e' vuoto
+    */
+    if chars[0] == '\0':
+        return " \t\n\r"
+    return chars
+
+
+def lstrip(stringa: str, chars: str) -> str:
+    /*
+    * Toglie dall'inizio di una stringa i caratteri di chars, come str.lstrip
+    * di Python.
+    * argomenti:
+    *   stringa: la stringa
+    *   chars: i caratteri da togliere, "" per lo spazio bianco
+    * return: la parte di stringa che resta (un punto dentro stringa, non una
+    *   copia)
+    */
+    effective_chars = resolve_strip_chars(chars)
+    for start = 0 as long; stringa[start] != '\0'; start++:
+        if not char_in_set(stringa[start], effective_chars):
+            break
+    
+    shifted = stringa + start
+    return shifted
+
+
+def rstrip(stringa: str, chars: str) -> str:
+    /*
+    * Toglie dalla fine di una stringa i caratteri di chars, come str.rstrip
+    * di Python: rstrip("banana", "an") -> "b".
+    * argomenti:
+    *   stringa: la stringa
+    *   chars: i caratteri da togliere, "" per lo spazio bianco
+    * return: la stringa senza quei caratteri finali (la stringa stessa se non
+    *   ne ha)
+    */
+    effective_chars = resolve_strip_chars(chars)
+    original_len = strlen(stringa)
+    end = original_len
+    while end > 0:
+        if not char_in_set(stringa[end - 1], effective_chars):
+            break
+        end--
+
+    if end == original_len:
+        return stringa
+
+    result_rstrip = substrget(stringa, end)
+    return result_rstrip
+
+
+def strip(stringa: str, chars: str) -> str:
+    /*
+    * Toglie dall'inizio e dalla fine di una stringa i caratteri di chars:
+    * strip(riga, "") equivale a riga.strip() di Python.
+    * argomenti:
+    *   stringa: la stringa
+    *   chars: i caratteri da togliere, "" per lo spazio bianco
+    * return: la stringa senza quei caratteri
+    */
+    trimmed_left = lstrip(stringa, chars)
+    result = rstrip(trimmed_left, chars)
+    return result
+
+
+def is_blank(stringa: str, chars: str) -> int:
+    /*
+    * Controlla se una stringa contiene solo caratteri di chars, come
+    * strip(stringa, chars) == "" ma senza allocare.
+    * argomenti:
+    *   stringa: la stringa
+    *   chars: i caratteri ammessi, "" per lo spazio bianco
+    * return: 1 se e' cosi' (anche per una stringa vuota), 0 altrimenti
+    */
+    effective_chars = resolve_strip_chars(chars)
+    for idx = 0 as long; stringa[idx] != '\0'; idx++:
+        if not char_in_set(stringa[idx], effective_chars):
+            return 0
+    return 1
+
+
+def find_num_occurence(stringa: str, substr: str) -> long:
+    /*
+    * Conta le occorrenze non sovrapposte di substr in stringa.
+    * argomenti:
+    *   stringa: la stringa in cui contare
+    *   substr: il testo da cercare, non vuoto
+    * return: il numero di occorrenze
+    */
+    max_iter = strlen(stringa)
+    len_occurrence = strlen(substr)
+    num_occurrences = 0 as long
+    offset = 0 as long
+
+    while offset < max_iter:
+        remaining = stringa + offset
+        pos_found = findsubstr(remaining, substr)
+
+        if pos_found == -1:
+            break
+
+        num_occurrences++
+        offset = offset + (pos_found + len_occurrence)
+
+    return num_occurrences
+
+
+def strcount(stringa: str, c: char) -> long:
+    /*
+    * Conta quante volte un carattere compare in una stringa.
+    * argomenti:
+    *   stringa: la stringa in cui contare
+    *   c: il carattere
+    * return: il numero di occorrenze
+    */
+    counter = 0 as long
+    for idx = 0 as long; stringa[idx] != '\0'; idx++:
+        if stringa[idx] == c:
+            counter++
+    return counter
+
+
+def startswith(string: str, substring: str) -> int:
+    /*
+    * Controlla se string comincia con substring.
+    * argomenti:
+    *   string: la stringa
+    *   substring: l'inizio cercato
+    * return: 1 se comincia cosi', 0 altrimenti
+    */
+    for idx = 0 as long; substring[idx] != '\0'; idx++:
+        if string[idx] != substring[idx]:
+            return 0
+    return 1
+
+
+def endswith(string: str, substring: str) -> int:
+    /*
+    * Controlla se string finisce con substring.
+    * argomenti:
+    *   string: la stringa
+    *   substring: la fine cercata
+    * return: 1 se finisce cosi', 0 altrimenti
+    */
+    size_string = strlen(string)
+    size_substring = strlen(substring)
+    if size_substring > size_string:
+        return 0
+
+    offset = size_string - size_substring
+    for idx = offset; idx < size_string; idx++:
+        if substring[idx - offset] != string[idx]:
+            return 0
+    return 1
+
+
+def find_char(stringa: str, occurr: char) -> long:
+    /*
+    * Restituisce l'indice della prima occorrenza di un carattere. Legge la
+    * stringa 16 byte alla volta: va bene sulle str di TryC, non su memoria C.
+    * argomenti:
+    *   stringa: la stringa
+    *   occurr: il carattere
+    * return: l'indice, -1 se il carattere non c'e'
+    */
+#ifdef __aarch64__
+    asminline (
+        dup v2.16b, w1
+        mov x2, 0
+        .loop:
+            ldr q0, [x0, x2]
+            cmeq v1.16b, v0.16b, 0
+            cmeq v3.16b, v0.16b, v2.16b
+            orr v1.16b, v1.16b, v3.16b
+            umaxv b4, v1.16b
+            fmov w3, s4
+            cbnz w3, .found
+            add x2, x2, 16
+            b .loop
+        .found:
+            shrn v1.8b, v1.8h, 4
+            fmov x3, d1
+            rbit x3, x3
+            clz x3, x3
+            lsr x3, x3, 2
+            add x2, x2, x3
+            ldrb w4, [x0, x2]
+            cmp w4, w1, uxtb
+            b.ne .notfound
+            mov x0, x2
+            b .out
+        .notfound:
+            mov x0, -1
+    ) endasm
+#else
+    asminline (
+        movzx eax, sil
+        imul eax, eax, 0x01010101
+        movd xmm2, eax
+        pshufd xmm2, xmm2, 0
+
+        xor rax, rax
+        .loop:
+            movdqu xmm0, [rdi + rax]
+            pxor xmm1, xmm1
+            pcmpeqb xmm1, xmm0
+            movdqa xmm3, xmm0
+            pcmpeqb xmm3, xmm2
+            por xmm1, xmm3
+            pmovmskb ecx, xmm1
+            test ecx, ecx
+            jnz .found
+            add rax, 16
+            jmp .loop
+        .found:
+            tzcnt ecx, ecx
+            add rax, rcx
+            movzx edx, byte [rdi + rax]
+            cmp dl, sil
+            jne .notfound
+            jmp .out
+        .notfound:
+            mov rax, -1
+    ) endasm
+#endif
+
+
+def rfind(stringa: str, occurr: char) -> long:
+    /*
+    * Restituisce l'indice dell'ultima occorrenza di un carattere.
+    * argomenti:
+    *   stringa: la stringa
+    *   occurr: il carattere
+    * return: l'indice, -1 se il carattere non c'e'
+    */
+    size_stringa = strlen(stringa)
+    for idx = size_stringa - 1; idx >= 0; idx--:
+        if stringa[idx] == occurr:
+            return idx
+    return -1
+
+
+def get_chars_in_range(stringa: str, start_pos: long, end_pos: long) -> str:
+    /*
+    * Copia i caratteri di una stringa da start_pos compreso a end_pos
+    * escluso, come stringa[start_pos:end_pos] in Python. Con end_pos minore
+    * di start_pos stampa un messaggio e termina il programma.
+    * argomenti:
+    *   stringa: la stringa
+    *   start_pos: il primo indice
+    *   end_pos: l'indice dopo l'ultimo
+    * return: la copia, "" se start_pos == end_pos
+    */
+    if end_pos < start_pos:
+        print(stringa + "\n")
+        print("error in get_chars_in_range()! end_pos < start_pos")
+        exit(1)
+
+    if end_pos == start_pos:
+        return ""
+
+    sub_stringa = rt_alloc_up(end_pos - start_pos + 1)
+    memcpy(sub_stringa, stringa + start_pos, end_pos - start_pos)
+    sub_stringa[end_pos - start_pos] = '\0'
+    rt_str_seal(sub_stringa, end_pos - start_pos)
+    return sub_stringa
+
+
+def get_chars_in_range_nursery(stringa: str, start_pos: long, end_pos: long) -> str:
+    /*
+    * Come get_chars_in_range, ma alloca nella nursery: la usa il compilatore
+    * quando il risultato non esce dalla funzione chiamante. Non va chiamata a
+    * mano.
+    * argomenti:
+    *   stringa: la stringa
+    *   start_pos: il primo indice
+    *   end_pos: l'indice dopo l'ultimo
+    * return: la copia
+    */
+    if end_pos < start_pos:
+        print(stringa + "\n")
+        print("error in get_chars_in_range()! end_pos < start_pos")
+        exit(1)
+
+    if end_pos == start_pos:
+        return ""
+
+    sub_stringa = rt_nursery_alloc(end_pos - start_pos + 1)
+    memcpy(sub_stringa, stringa + start_pos, end_pos - start_pos)
+    sub_stringa[end_pos - start_pos] = '\0'
+    rt_str_seal(sub_stringa, end_pos - start_pos)
+    return sub_stringa
+
+
+def strreadline(text: str, num_riga: long) -> str:
+    /*
+    * Restituisce la riga numero num_riga di un testo, contando da 1, senza un
+    * '\r' finale e con un '\n' in fondo. Con num_riga minore di 1 stampa un
+    * messaggio e termina il programma.
+    * argomenti:
+    *   text: il testo
+    *   num_riga: il numero della riga, da 1
+    * return: la riga con il '\n' finale, "\n" se il testo ha meno righe
+    */
+    size_of_text = strlen(text)
+
+    if num_riga < 1:
+        print("error! the file can't have a num row < 1")
+        exit(1)
+
+    current_line = 1 as long
+    idx = 0 as long
+
+    while idx < size_of_text:
+        if current_line == num_riga:
+            break
+
+        if text[idx] == '\n':
+            current_line++
+
+        idx++
+
+    stringa = ""
+
+    while idx < size_of_text:
+        if text[idx] == '\n':
+            break
+
+        stringa = stringa + text[idx]
+        idx++
+
+    n_stringa = strlen(stringa)
+    if n_stringa > 0:
+        if stringa[n_stringa - 1] == '\r':
+            stringa = get_chars_in_range(stringa, 0, n_stringa - 1)
+
+    return stringa + "\n"
+
+
+def split_count(stringa: str, sep: str) -> long:
+    /*
+    * Restituisce in quanti pezzi split_next divide una stringa: le
+    * occorrenze di sep piu' una. Con sep vuoto stampa un messaggio e termina
+    * il programma.
+    * argomenti:
+    *   stringa: la stringa
+    *   sep: il separatore
+    * return: il numero di pezzi
+    */
+    if strlen(sep) == 0:
+        print("Error in split_count! 'sep' cannot be empty\n")
+        exit(1)
+    return find_num_occurence(stringa, sep) + 1
+
+
+def split_next(stringa: str, sep: str, offset: long) -> (long, str):
+    /*
+    * Restituisce il pezzo di stringa che comincia a offset e finisce alla
+    * prossima occorrenza di sep: un passo di str.split di Python. Tutti i
+    * pezzi, in ordine:
+    *     offset = 0 as long
+    *     while offset >= 0:
+    *         offset, pezzo = split_next(s, ",", offset)
+    * Con sep vuoto stampa un messaggio e termina il programma.
+    * argomenti:
+    *   stringa: la stringa
+    *   sep: il separatore
+    *   offset: dove comincia il pezzo: 0 la prima volta, poi il primo valore
+    *     restituito dalla chiamata precedente
+    * return: (dove comincia il pezzo dopo, -1 se questo era l'ultimo; il
+    *   pezzo)
+    */
+    len_sep = strlen(sep)
+    if len_sep == 0:
+        print("Error in split_next! 'sep' cannot be empty\n")
+        exit(1)
+
+    remaining = stringa + offset
+    pos = findsubstr(remaining, sep)
+    if pos == -1:
+        pezzo = substrget(remaining, strlen(remaining))
+        return -1 as long, pezzo
+
+    pezzo = substrget(remaining, pos)
+    prossimo = offset + pos + len_sep
+    return prossimo, pezzo
+
+
+def replace(stringa: str, old: str, sostituto: str) -> str:
+    /*
+    * Sostituisce ogni occorrenza non sovrapposta di old con sostituto, come
+    * str.replace di Python. Con old vuoto stampa un messaggio e termina il
+    * programma.
+    * argomenti:
+    *   stringa: la stringa
+    *   old: il testo da sostituire
+    *   sostituto: il testo nuovo, anche vuoto
+    * return: la stringa nuova
+    */
+    len_old = strlen(old)
+    if len_old == 0:
+        print("Error in replace! 'old' cannot be empty\n")
+        exit(1)
+
+    result = ""
+    offset = 0 as long
+    max_iter = strlen(stringa)
+    
+    while offset <= max_iter:
+        remaining = stringa + offset
+        pos = findsubstr(remaining, old)
+
+        if pos == -1:
+            result = result + remaining
+            break
+    
+        prefix = substrget(remaining, pos)
+        result = result + prefix + sostituto
+        offset = offset + pos + len_old
+
+    return result
+
+
+class Joiner:
+    /*
+    * Unisce dei pezzi in una stringa con un separatore: joiner_new, poi
+    * add per ogni pezzo, poi get_result.
+    */
+    sep str
+    result str
+    count int
+    add &joiner_add
+    get_result &joiner_result
+
+
+def joiner_new(sep: str) -> Joiner:
+    /*
+    * Crea un Joiner, che unisce dei pezzi in una stringa mettendo sep fra
+    * uno e l'altro, come sep.join(...) di Python.
+    * argomenti:
+    *   sep: il separatore
+    * return: il Joiner
+    */
+    j = new Joiner()
+    j.sep = sep
+    j.result = ""
+    j.count = 0
+    return j
+
+
+def joiner_add(j: Joiner, pezzo: str) -> Joiner:
+    /*
+    * Aggiunge un pezzo in fondo al Joiner.
+    * argomenti:
+    *   j: il Joiner
+    *   pezzo: il pezzo
+    * return: j
+    */
+    if j.count == 0:
+        j.result = pezzo
+    else:
+        j.result = j.result + j.sep + pezzo
+    j.count = j.count + 1
+    return j
+
+
+def joiner_result(j: Joiner) -> str:
+    /*
+    * Restituisce i pezzi aggiunti finora, uniti dal separatore.
+    * argomenti:
+    *   j: il Joiner
+    * return: il risultato, "" se non c'e' ancora nessun pezzo
+    */
+    return j.result
+
+
+READER_SLAB_DEFAULT_SIZE = 4096 as long
+
+
+class Reader:
+    all_text str
+    actual_row str
+    offset_start long
+    num_line long
+    total_num_nl long
+    eof int
+    row_slab str
+    row_slab_cap long
+    row_slab_used long
+    slab_new &reader_slab_new
+    slab_take_row &reader_slab_take_row
+    next_row &reader_next_row
+    set_idx &reader_set_idx
+
+
+def reader_slab_new(reader_o: Reader, min_cap: long) -> None:
+    /*
+    * Alloca per le righe del Reader un blocco nuovo, di almeno min_cap byte
+    * e almeno READER_SLAB_DEFAULT_SIZE.
+    * argomenti:
+    *   reader_o: il Reader
+    *   min_cap: i byte minimi
+    * return: nessuno (procedura)
+    */
+    new_cap = min_cap
+    if new_cap < READER_SLAB_DEFAULT_SIZE:
+        new_cap = READER_SLAB_DEFAULT_SIZE
+
+    reader_o.row_slab = rt_alloc_up(new_cap)
+    reader_o.row_slab_cap = new_cap
+    reader_o.row_slab_used = 0 as long
+
+
+def reader_slab_take_row(reader_o: Reader, src: str, len_no_nl: long) -> str:
+    /*
+    * Copia una riga nel blocco del Reader, con un '\n' finale.
+    * argomenti:
+    *   reader_o: il Reader
+    *   src: l'inizio della riga nel testo
+    *   len_no_nl: la lunghezza della riga, senza a capo
+    * return: la riga
+    */
+    need = 16 + len_no_nl + 2 + 16
+
+    if reader_o.row_slab_used + need > reader_o.row_slab_cap:
+        reader_slab_new(reader_o, need)
+
+    row_ptr = reader_o.row_slab + reader_o.row_slab_used + 16
+    memcpy(row_ptr, src, len_no_nl)
+    row_ptr[len_no_nl] = '\n'
+    row_ptr[len_no_nl + 1] = '\0'
+    rt_str_seal(row_ptr, len_no_nl + 1)
+    reader_o.row_slab_used = reader_o.row_slab_used + need
+
+    return row_ptr
+
+
+def reader_next_row(reader_o: Reader) -> str:
+    /*
+    * Legge la prossima riga del testo, sempre con un '\n' finale (un '\r'
+    * viene tolto). Dopo l'ultima riga reader_o.eof diventa 1.
+    * argomenti:
+    *   reader_o: il Reader
+    * return: la riga, "" se eof era gia' 1
+    */
+
+    if reader_o.eof:
+        return ""
+
+    idx_base = reader_o.offset_start
+    text = reader_o.all_text
+    start = idx_base
+
+    idx_nl = find_char(text + start, '\n')
+
+    if idx_nl == -1:
+        idx_base = start + (strlen(text + start) as long)
+        reader_o.eof = 1
+    else:
+        idx_base = start + (idx_nl as long)
+
+    has_cr = 0
+    k = start
+    while k < idx_base:
+        if text[k] == '\r':
+            has_cr = 1
+            break
+        k++
+
+    if has_cr:
+        len_no_nl = idx_base - start
+        need = 16 + len_no_nl + 2 + 16
+        if reader_o.row_slab_used + need > reader_o.row_slab_cap:
+            reader_slab_new(reader_o, need)
+
+        row_ptr = reader_o.row_slab + reader_o.row_slab_used + 16
+        w = 0
+        k = start
+
+        while k < idx_base:
+            if text[k] != '\r':
+                row_ptr[w] = text[k]
+                w++
+            k++
+
+        row_ptr[w] = '\n'
+        row_ptr[w + 1] = '\0'
+        rt_str_seal(row_ptr, w + 1)
+        reader_o.row_slab_used = reader_o.row_slab_used + need
+        row = row_ptr
+        idx_base++
+
+    else:
+        row = reader_slab_take_row(reader_o, text + start, idx_base - start)
+        idx_base++
+
+    reader_o.offset_start = idx_base
+    reader_o.actual_row = row
+    reader_o.num_line++
+    return row
+
+
+def reader_set_idx(reader_o: Reader, new_idx: long) -> None:
+    /*
+    * Riporta il Reader allo stato in cui sarebbe dopo new_idx chiamate a
+    * reader_next_row dall'inizio del testo. Se il testo ha meno righe si
+    * ferma all'ultima, con eof a 1.
+    * argomenti:
+    *   reader_o: il Reader
+    *   new_idx: quante righe considerare gia' lette, 0 per ricominciare
+    * return: nessuno (procedura)
+    */
+    text = reader_o.all_text
+    idx_base = 0 as long
+    row = ""
+    n = 0 as long
+
+    while n < new_idx:
+        candidate = ""
+        while text[idx_base] != '\n' and text[idx_base] != '\0':
+            if text[idx_base] != '\r':
+                candidate = candidate + text[idx_base]
+            idx_base++
+
+        if text[idx_base] == '\0':
+            reader_o.eof = 1
+            break
+
+        idx_base++
+        row = candidate + "\n"
+        n++
+
+    reader_o.offset_start = idx_base
+    reader_o.actual_row = row
+    reader_o.num_line = n
+
+    if n == new_idx:
+        reader_o.eof = 0
+    return
+
+
+def new_reader(all_text: str) -> Reader:
+    /*
+    * Crea un Reader che legge un testo riga per riga con next_row.
+    * argomenti:
+    *   all_text: il testo
+    * return: il Reader
+    */
+    reader_o = new Reader()
+
+    reader_o.all_text = all_text
+    reader_o.offset_start = 0
+    reader_o.actual_row = ""
+    reader_o.num_line = 0
+
+    reader_o.total_num_nl = strcount(all_text, '\n')
+    reader_o.eof = 0
+
+    text_len = strlen(all_text) as long
+    slab_cap = text_len + ((reader_o.total_num_nl + 2) * 18)
+    reader_slab_new(reader_o, slab_cap)
+
+    return reader_o

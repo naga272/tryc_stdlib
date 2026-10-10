@@ -1,0 +1,469 @@
+/*
+* list: List, un array di riferimenti (ref) che raddoppia quando e' pieno,
+* e LongList, lo stesso per i long.
+*
+* L'accesso per indice e' O(1), list_push O(1) ammortizzato,
+* list_push_first e list_pop_front O(n). Le funzioni che leggono una
+* posizione o un estremo non controllano i limiti oltre al controllo del
+* linguaggio sul buffer: si guarda prima list_length o list_is_empty.
+*/
+
+LIST_DEFAULT_CAP = 4 as long
+
+
+class List:
+    data ref[]
+    cap long
+    length long
+
+
+def list_new() -> List:
+    /*
+    * Crea una lista vuota; il buffer si alloca al primo inserimento.
+    * return: la lista
+    */
+    lst = new List()
+    lst.cap = 0 as long
+    lst.length = 0 as long
+    return lst
+
+
+def list_new_cap(initial_cap: long) -> List:
+    /*
+    * Crea una lista vuota con posto per initial_cap elementi, per evitare le
+    * riallocazioni quando la dimensione e' nota in anticipo. Se serve, la
+    * lista cresce comunque oltre.
+    * argomenti:
+    *   initial_cap: quanti elementi riservare; 0 o meno vale come list_new
+    * return: la lista
+    */
+    lst = new List()
+    lst.cap = 0 as long
+    lst.length = 0 as long
+    if initial_cap > 0 as long:
+        list_grow(lst, initial_cap)
+    return lst
+
+
+def list_length(lst: List) -> long:
+    /*
+    * Restituisce il numero di elementi della lista.
+    * argomenti:
+    *   lst: la lista
+    * return: il numero di elementi
+    */
+    return lst.length
+
+
+def list_is_empty(lst: List) -> int:
+    /*
+    * Controlla se la lista e' vuota.
+    * argomenti:
+    *   lst: la lista
+    * return: 1 se vuota, 0 altrimenti
+    */
+    if lst.length == 0 as long:
+        return 1
+    return 0
+
+
+def list_grow(lst: List, min_extra: long) -> None:
+    /*
+    * Fa posto per min_extra elementi in piu', raddoppiando la capacita'.
+    * argomenti:
+    *   lst: la lista
+    *   min_extra: quanti elementi in piu'
+    * return: nessuno (procedura)
+    */
+    needed = lst.length + min_extra
+    if needed <= lst.cap:
+        return
+
+    new_cap = lst.cap
+    if new_cap == 0 as long:
+        new_cap = LIST_DEFAULT_CAP
+    while new_cap < needed:
+        new_cap = new_cap * 2
+
+    new_data = new ref[new_cap]
+
+    k = 0 as long
+    while k < lst.length:
+        new_data[k] = lst.data[k]
+        k++
+
+    lst.data = new_data
+    lst.cap = new_cap
+    return
+
+
+def list_push(lst: List, value: ref) -> None:
+    /*
+    * Aggiunge un valore in fondo alla lista, in O(1) ammortizzato.
+    * argomenti:
+    *   lst: la lista
+    *   value: il valore: una str, un oggetto o un array (si rilegge con
+    *     'as tipo')
+    * return: nessuno (procedura)
+    */
+    if lst.length >= lst.cap:
+        list_grow(lst, 1 as long)
+    lst.data[lst.length] = value
+    lst.length++
+    return
+
+
+def list_push_first(lst: List, value: ref) -> None:
+    /*
+    * Aggiunge un valore in testa alla lista, spostando gli altri (O(n)).
+    * argomenti:
+    *   lst: la lista
+    *   value: il valore
+    * return: nessuno (procedura)
+    */
+    list_grow(lst, 1 as long)
+    k = lst.length
+    while k > 0 as long:
+        lst.data[k] = lst.data[k - 1 as long]
+        k--
+    lst.data[0] = value
+    lst.length++
+    return
+
+
+def list_pop_back(lst: List) -> ref:
+    /*
+    * Toglie e restituisce l'ultimo elemento. La lista non deve essere vuota.
+    * argomenti:
+    *   lst: la lista
+    * return: l'elemento tolto
+    */
+    lst.length--
+    value = lst.data[lst.length]
+    lst.data[lst.length] = 0 as ref
+    return value
+
+
+def list_pop_front(lst: List) -> ref:
+    /*
+    * Toglie e restituisce il primo elemento, spostando gli altri (O(n)). La
+    * lista non deve essere vuota.
+    * argomenti:
+    *   lst: la lista
+    * return: l'elemento tolto
+    */
+    value = lst.data[0]
+    lst.length--
+    k = 0 as long
+    while k < lst.length:
+        lst.data[k] = lst.data[k + 1 as long]
+        k++
+    lst.data[lst.length] = 0 as ref
+    return value
+
+
+def list_peek_back(lst: List) -> ref:
+    /*
+    * Restituisce l'ultimo elemento senza toglierlo. La lista non deve essere
+    * vuota.
+    * argomenti:
+    *   lst: la lista
+    * return: l'elemento
+    */
+    return lst.data[lst.length - 1 as long]
+
+
+def list_peek_front(lst: List) -> ref:
+    /*
+    * Restituisce il primo elemento senza toglierlo. La lista non deve essere
+    * vuota.
+    * argomenti:
+    *   lst: la lista
+    * return: l'elemento
+    */
+    return lst.data[0]
+
+
+def list_get(lst: List, index: long) -> ref:
+    /*
+    * Restituisce l'elemento in posizione index.
+    * argomenti:
+    *   lst: la lista
+    *   index: la posizione, da 0 a list_length(lst) - 1
+    * return: l'elemento
+    */
+    return lst.data[index]
+
+
+def list_set(lst: List, index: long, value: ref) -> None:
+    /*
+    * Sostituisce l'elemento in posizione index.
+    * argomenti:
+    *   lst: la lista
+    *   index: la posizione, da 0 a list_length(lst) - 1
+    *   value: il valore nuovo
+    * return: nessuno (procedura)
+    */
+    lst.data[index] = value
+    return
+
+
+def list_clear(lst: List) -> None:
+    /*
+    * Svuota la lista, tenendo la capacita' allocata.
+    * argomenti:
+    *   lst: la lista
+    * return: nessuno (procedura)
+    */
+    lst.length = 0 as long
+    return
+
+
+def list_get_range(lst: List, start: long, end: long) -> List:
+    /*
+    * Restituisce una lista nuova con gli elementi da start compreso a end
+    * escluso. Con un intervallo non valido stampa un messaggio e termina il
+    * programma.
+    * argomenti:
+    *   lst: la lista
+    *   start: la prima posizione
+    *   end: la posizione dopo l'ultima
+    * return: la lista nuova
+    */
+    size_lst = list_length(lst)
+
+    if start > end or end > size_lst or start < 0 as long:
+        print(
+            "Error in list_get_range()" +
+            "\nlista length" + itoa(size_lst) +
+            "\nstart offset richiesto: " + itoa(start) +
+            "\nend offset richiesto: " + itoa(end) + "\n"
+        )
+        exit(1)
+
+    count = end - start
+    ret_lista = list_new_cap(count)
+    idx = start
+    j = 0 as long
+    while idx < end:
+        ret_lista.data[j] = lst.data[idx]
+        idx++
+        j++
+    ret_lista.length = count
+
+    return ret_lista
+
+
+def list_merge(lst1: List, lst2: List) -> List:
+    /*
+    * Restituisce una lista nuova con gli elementi di lst1 seguiti da quelli
+    * di lst2; le due liste non cambiano.
+    * argomenti:
+    *   lst1: la prima lista
+    *   lst2: la seconda lista
+    * return: la lista nuova
+    */
+    n1 = lst1.length
+    n2 = lst2.length
+    ret_lista = list_new_cap(n1 + n2)
+
+    i = 0 as long
+    while i < n1:
+        ret_lista.data[i] = lst1.data[i]
+        i++
+
+    i = 0 as long
+    while i < n2:
+        ret_lista.data[n1 + i] = lst2.data[i]
+        i++
+
+    ret_lista.length = n1 + n2
+
+    return ret_lista
+
+
+/*
+* ListCursor: un cursore su una List, che legge e scrive per indice come
+* list_get e list_set.
+*/
+
+class ListCursor:
+    lst ref
+
+
+def list_cursor_new(lst: List) -> ListCursor:
+    /*
+    * Crea un cursore su una lista.
+    * argomenti:
+    *   lst: la lista
+    * return: il cursore
+    */
+    cur = new ListCursor()
+    cur.lst = lst
+    return cur
+
+
+def list_cursor_get(cur: ListCursor, index: long) -> ref:
+    /*
+    * Restituisce l'elemento in posizione index della lista del cursore.
+    * argomenti:
+    *   cur: il cursore
+    *   index: la posizione
+    * return: l'elemento
+    */
+    lst = cur.lst as List
+    return lst.data[index]
+
+
+def list_cursor_set(cur: ListCursor, index: long, value: ref) -> None:
+    /*
+    * Sostituisce l'elemento in posizione index della lista del cursore.
+    * argomenti:
+    *   cur: il cursore
+    *   index: la posizione
+    *   value: il valore nuovo
+    * return: nessuno (procedura)
+    */
+    lst = cur.lst as List
+    lst.data[index] = value
+    return
+
+
+def list_cpy(lst1: List, lst2: List) -> None:
+    /*
+    * Copia in lst1 gli elementi di lst2, al posto dei suoi; le due liste
+    * restano indipendenti.
+    * argomenti:
+    *   lst1: la lista di destinazione
+    *   lst2: la lista da copiare
+    * return: nessuno (procedura)
+    */
+    list_clear(lst1)
+
+    n2 = lst2.length
+    list_grow(lst1, n2)
+    i = 0 as long
+    while i < n2:
+        lst1.data[i] = lst2.data[i]
+        i++
+    lst1.length = n2
+    return
+
+
+/*
+* LongList: la stessa lista, di numeri. Una List tiene solo puntatori
+* (ref): una sequenza di long che cresce va qui. API ridotta a quello
+* che serve (push/get/set/pop/length/clear), stesso raddoppio.
+*/
+class LongList:
+    data long[]
+    cap long
+    length long
+
+
+def llist_new() -> LongList:
+    /*
+    * Crea una LongList vuota; il buffer si alloca al primo inserimento.
+    * return: la lista
+    */
+    lst = new LongList()
+    lst.cap = 0 as long
+    lst.length = 0 as long
+    return lst
+
+
+def llist_grow(lst: LongList, min_extra: long) -> None:
+    /*
+    * Fa posto per min_extra elementi in piu', raddoppiando la capacita'.
+    * argomenti:
+    *   lst: la lista
+    *   min_extra: quanti elementi in piu'
+    * return: nessuno (procedura)
+    */
+    needed = lst.length + min_extra
+    if needed <= lst.cap:
+        return
+    new_cap = lst.cap
+    if new_cap == 0 as long:
+        new_cap = LIST_DEFAULT_CAP
+    while new_cap < needed:
+        new_cap = new_cap * 2
+    new_data = new long[new_cap]
+    k = 0 as long
+    while k < lst.length:
+        new_data[k] = lst.data[k]
+        k++
+    lst.data = new_data
+    lst.cap = new_cap
+    return
+
+
+def llist_length(lst: LongList) -> long:
+    /*
+    * Restituisce il numero di elementi della lista.
+    * argomenti:
+    *   lst: la lista
+    * return: il numero di elementi
+    */
+    return lst.length
+
+
+def llist_push(lst: LongList, value: long) -> None:
+    /*
+    * Aggiunge un numero in fondo alla lista, in O(1) ammortizzato.
+    * argomenti:
+    *   lst: la lista
+    *   value: il numero
+    * return: nessuno (procedura)
+    */
+    if lst.length >= lst.cap:
+        llist_grow(lst, 1 as long)
+    lst.data[lst.length] = value
+    lst.length++
+    return
+
+
+def llist_get(lst: LongList, index: long) -> long:
+    /*
+    * Restituisce l'elemento in posizione index.
+    * argomenti:
+    *   lst: la lista
+    *   index: la posizione, da 0 a llist_length(lst) - 1
+    * return: il numero
+    */
+    return lst.data[index]
+
+
+def llist_set(lst: LongList, index: long, value: long) -> None:
+    /*
+    * Sostituisce l'elemento in posizione index.
+    * argomenti:
+    *   lst: la lista
+    *   index: la posizione, da 0 a llist_length(lst) - 1
+    *   value: il numero nuovo
+    * return: nessuno (procedura)
+    */
+    lst.data[index] = value
+    return
+
+
+def llist_pop_back(lst: LongList) -> long:
+    /*
+    * Toglie e restituisce l'ultimo elemento. La lista non deve essere vuota.
+    * argomenti:
+    *   lst: la lista
+    * return: il numero tolto
+    */
+    lst.length--
+    return lst.data[lst.length]
+
+
+def llist_clear(lst: LongList) -> None:
+    /*
+    * Svuota la lista, tenendo la capacita' allocata.
+    * argomenti:
+    *   lst: la lista
+    * return: nessuno (procedura)
+    */
+    lst.length = 0 as long
+    return

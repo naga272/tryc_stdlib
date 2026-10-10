@@ -1,0 +1,201 @@
+/*
+* sqlite3: binding a libsqlite3 (winsqlite3.dll su Windows), con qualche
+* funzione di comodo per eseguire query.
+*/
+
+#ifdef __unix__
+libextern <libsqlite3.so>
+#else
+// in System32 da Windows 10
+libextern <winsqlite3.dll>
+#endif
+
+#include <libstd/stdio>
+
+#ifndef SQLITE_OK
+#define SQLITE_OK           0
+#endif
+
+#ifndef SQLITE_ERROR
+#define SQLITE_ERROR        1
+#endif
+
+#ifndef SQLITE_INTERNAL
+#define SQLITE_INTERNAL     2
+#endif
+
+#ifndef SQLITE_PERM
+#define SQLITE_PERM         3
+#endif
+
+#ifndef SQLITE_ABORT
+#define SQLITE_ABORT        4
+#endif
+
+#ifndef SQLITE_BUSY
+#define SQLITE_BUSY         5
+#endif
+
+#ifndef SQLITE_LOCKED
+#define SQLITE_LOCKED       6
+#endif
+
+#ifndef SQLITE_NOMEM
+#define SQLITE_NOMEM        7
+#endif
+
+#ifndef SQLITE_READONLY
+#define SQLITE_READONLY     8
+#endif
+
+#ifndef SQLITE_INTERRUPT
+#define SQLITE_INTERRUPT    9
+#endif
+
+#ifndef SQLITE_IOERR
+#define SQLITE_IOERR        10
+#endif
+
+#ifndef SQLITE_CORRUPT
+#define SQLITE_CORRUPT      11
+#endif
+
+#ifndef SQLITE_NOTFOUND
+#define SQLITE_NOTFOUND     12
+#endif
+
+#ifndef SQLITE_FULL
+#define SQLITE_FULL         13
+#endif
+
+#ifndef SQLITE_CANTOPEN
+#define SQLITE_CANTOPEN     14
+#endif
+
+
+extern class sqlite3
+extern class sqlite3_stmt
+
+extern def sqlite3_libversion() -> str
+extern def sqlite3_open(filename: str, ppDb: &sqlite3) -> int
+extern def sqlite3_exec(dbs: sqlite3, sql: str, callback: int, arg: int, errmsg: &str) -> int
+extern def sqlite3_close(dbs: sqlite3) -> int
+extern def sqlite3_free(ptr: str) -> None
+extern def sqlite3_prepare_v2(dbs: sqlite3, SQL: str, nBytes: int, stmt: &sqlite3_stmt, ptr: int) -> int
+extern def sqlite3_bind_text(stmt: sqlite3_stmt, index: int, text: str, len_text: int, flag: int) -> int
+extern def sqlite3_step(stmt: sqlite3_stmt) -> int
+extern def sqlite3_finalize(stmt: sqlite3_stmt) -> int
+
+#define SQLITE_TRANSIENT -1
+
+// non ci sono piu righe
+#define SQLITE_DONE 101
+
+// e' disponibile una riga di risultati
+#define SQLITE_ROW 100
+
+
+def sqlite3_checker_error(dbs: sqlite3, response: int, error: str) -> int:
+    /*
+    * Controlla il codice di ritorno di un'operazione sqlite3: se non e'
+    * SQLITE_OK stampa il messaggio, chiude la connessione e termina il
+    * programma. Il messaggio viene sempre liberato con sqlite3_free.
+    * argomenti:
+    *   dbs: la connessione
+    *   response: il codice da controllare
+    *   error: il messaggio restituito da sqlite3
+    * return: response
+    */
+    if response != SQLITE_OK:
+        print(error + "\n")
+        sqlite3_free(error)
+        sqlite3_close(dbs)
+        exit(1)
+
+    sqlite3_free(error)
+    return response
+
+
+def response_sqlite3_query(arg: int, argc: int, argv: str, azColName: int) -> int:
+    /*
+    * Callback per sqlite3_exec che ignora le righe ricevute.
+    * argomenti:
+    *   arg: il puntatore passato a sqlite3_exec
+    *   argc: il numero di colonne della riga
+    *   argv: i valori delle colonne
+    *   azColName: i nomi delle colonne
+    * return: 0, per continuare l'esecuzione
+    */
+    return 0
+
+
+def sqlite3_exec_w(dbs: sqlite3, query: str) -> int:
+    /*
+    * Esegue una query che non restituisce righe (CREATE TABLE, INSERT,
+    * UPDATE...); in caso di errore termina il programma.
+    * argomenti:
+    *   dbs: la connessione
+    *   query: la query
+    * return: SQLITE_OK
+    */
+    errmsg =: str
+    response = sqlite3_exec(dbs, query, 0, 0, &errmsg)
+    response = sqlite3_checker_error(dbs, response, errmsg)
+    return response
+
+
+def sqlite3_drop_table(dbs: sqlite3, name_table: str) -> int:
+    /*
+    * Elimina una tabella (DROP TABLE); in caso di errore termina il
+    * programma.
+    * argomenti:
+    *   dbs: la connessione
+    *   name_table: il nome della tabella
+    * return: SQLITE_OK
+    */
+    errmsg =: str
+    query = "DROP TABLE " + name_table + ";"
+    response = sqlite3_exec(dbs, query, 0, 0, &errmsg)
+    return sqlite3_checker_error(dbs, response, errmsg)
+
+
+def sqlite3_run_query(dbs: sqlite3) -> None:
+    /*
+    * Esegue "SELECT * FROM Users;" senza leggerne le righe; in caso di
+    * errore termina il programma.
+    * argomenti:
+    *   dbs: la connessione
+    * return: nessuno (procedura)
+    */
+    err_msg =: str
+    response = sqlite3_exec(dbs, "SELECT * FROM Users;", 0, 0, &err_msg)
+    sqlite3_checker_error(dbs, response, err_msg)
+
+
+def sqlite3_prepare_stmnt(dbs: sqlite3, sql: str, stmt: &sqlite3_stmt) -> int:
+    /*
+    * Prepara una query con i parametri '?', da riempire con sqlite3_bind
+    * ed eseguire con sqlite3_step.
+    * argomenti:
+    *   dbs: la connessione
+    *   sql: la query
+    *   stmt: dove scrivere lo statement preparato
+    * return: il codice di sqlite3_prepare_v2, SQLITE_OK se riuscita
+    */
+    response = sqlite3_prepare_v2(dbs, sql, -1, stmt, 0)
+    return response
+
+
+def sqlite3_bind(stmt: sqlite3_stmt, index: int, text: str) -> int:
+    /*
+    * Assegna un testo a un parametro '?' di uno statement preparato; sqlite3
+    * ne fa una copia.
+    * argomenti:
+    *   stmt: lo statement
+    *   index: la posizione del parametro, da 1
+    *   text: il testo
+    * return: il codice di sqlite3_bind_text, SQLITE_OK se riuscita
+    */
+    size_text = long_to_int(strlen(text))
+    response = sqlite3_bind_text(stmt, index, text, size_text, SQLITE_TRANSIENT)
+    return response

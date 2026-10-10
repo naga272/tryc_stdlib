@@ -1,0 +1,464 @@
+
+#ifdef __aarch64__
+// aarch64 non ha readlink e pipe: readlinkat e pipe2
+#define SYS_GETCWD   17
+#define SYS_CHDIR    49
+#define SYS_UNAME    160
+#define SYS_READLINKAT 78
+#define SYS_PIPE2    59
+#define SYS_SYS_INFO 179
+
+#ifndef AT_FDCWD
+#define AT_FDCWD -100
+#endif
+#else
+#define SYS_GETCWD   79
+#define SYS_CHDIR    80
+#define SYS_UNAME    63
+#define SYS_READLINK 89
+#define SYS_SYS_INFO 99
+#endif
+
+
+#ifndef UTSNAME_FIELD_SIZE
+/*
+* struct new_utsname del kernel (<linux/utsname.h>): 6 campi da 65 byte,
+* stringhe terminate da '\0', 390 byte in tutto
+*/
+#define UTSNAME_FIELD_SIZE 65
+#endif
+
+#ifndef UTSNAME_TOTAL_SIZE
+#define UTSNAME_TOTAL_SIZE 390
+#endif
+
+#ifndef UTSNAME_OFF_SYSNAME
+#define UTSNAME_OFF_SYSNAME 0
+#endif
+
+#ifndef UTSNAME_OFF_NODENAME
+#define UTSNAME_OFF_NODENAME 65
+#endif
+
+#ifndef UTSNAME_OFF_RELEASE
+#define UTSNAME_OFF_RELEASE 130
+#endif
+
+#ifndef UTSNAME_OFF_VERSION
+#define UTSNAME_OFF_VERSION 195
+#endif
+
+
+#ifndef X_OK
+/*
+* modalita' per sys_access (vedi libstd/file)
+*/
+#define X_OK 1
+#endif
+
+#ifndef UTSNAME_OFF_MACHINE
+#define UTSNAME_OFF_MACHINE 260
+#endif
+
+#ifndef UTSNAME_OFF_DOMAINNAME
+#define UTSNAME_OFF_DOMAINNAME 325
+#endif
+
+
+#ifndef OS_PATH_MAX
+// dimensione di un buffer sufficiente per un percorso assoluto
+#define OS_PATH_MAX 4096
+#endif
+
+// struct sysinfo del kernel (man 2 sysinfo); memoria e swap sono in unita'
+// di mem_unit byte
+class SysInfo --no-padding:
+    uptime long
+    load1 long
+    load2 long
+    load3 long
+    total_ram long
+    free_ram long
+    sharedram long
+    bufferram long
+    totalswap long
+    freeswap long
+    procs short
+    totalhigh long
+    freehigh long
+    mem_unit int
+    __pad0 long
+    __pad1 long
+    __pad2 long
+    __pad3 long
+    __pad4 long
+    __pad5 long
+    __pad6 long
+    __pad7 long
+
+
+def sys_sysinfo(sysinfo_i: SysInfo) -> int:
+    /*
+    * Legge le statistiche del sistema: uptime, carico, memoria e swap
+    * (syscall sysinfo).
+    * argomenti:
+    *   sysinfo_i: dove scriverle
+    * return: 0 se riuscita, negativo in caso di errore
+    */
+#ifdef __aarch64__
+    asminline(
+        mov x8, SYS_SYS_INFO
+        svc #0
+    ) endasm
+#else
+    asminline(
+        mov rax, SYS_SYS_INFO
+        syscall
+    )endasm
+#endif
+
+
+def sys_getcwd(buf: str, size: int) -> int:
+    /*
+    * Scrive in buf la directory di lavoro corrente (syscall getcwd).
+    * argomenti:
+    *   buf: il buffer
+    *   size: la sua dimensione in byte
+    * return: la lunghezza del percorso, terminatore compreso; negativo in
+    *   caso di errore
+    */
+#ifdef __aarch64__
+    asminline(
+        sxtw x1, w1
+        mov x8, SYS_GETCWD
+        svc #0
+    ) endasm
+#else
+    asminline(
+        mov rax, SYS_GETCWD
+        syscall
+    ) endasm
+#endif
+
+
+def sys_chdir(path: str) -> int:
+    /*
+    * Cambia la directory di lavoro del processo (syscall chdir).
+    * argomenti:
+    *   path: la nuova directory, assoluta o relativa
+    * return: 0 se riuscita, negativo in caso di errore
+    */
+#ifdef __aarch64__
+    asminline(
+        mov x8, SYS_CHDIR
+        svc #0
+    ) endasm
+#else
+    asminline(
+        mov rax, SYS_CHDIR
+        syscall
+    ) endasm
+#endif
+
+
+def sys_uname(buf: str) -> int:
+    /*
+    * Legge nome e versione del sistema (syscall uname) in un buffer di
+    * UTSNAME_TOTAL_SIZE byte, con i campi agli offset UTSNAME_OFF_*.
+    * argomenti:
+    *   buf: il buffer
+    * return: 0 se riuscita, negativo in caso di errore
+    */
+#ifdef __aarch64__
+    asminline(
+        mov x8, SYS_UNAME
+        svc #0
+    ) endasm
+#else
+    asminline(
+        mov rax, SYS_UNAME
+        syscall
+    ) endasm
+#endif
+
+
+def sys_readlink(path: str, buf: str, size: int) -> int:
+    /*
+    * Legge il percorso a cui punta un link simbolico (syscall readlink),
+    * senza terminatore.
+    * argomenti:
+    *   path: il link, es. "/proc/self/exe"
+    *   buf: dove scrivere il percorso
+    *   size: la dimensione di buf
+    * return: i byte scritti, negativo in caso di errore
+    */
+#ifdef __aarch64__
+    asminline(
+        mov x3, x2
+        mov x2, x1
+        mov x1, x0
+        mov x0, AT_FDCWD
+        mov x8, SYS_READLINKAT
+        svc #0
+    ) endasm
+#else
+    asminline(
+        mov rax, SYS_READLINK
+        syscall
+    ) endasm
+#endif
+
+
+def sys_pipe(fds: str) -> int:
+    /*
+    * Crea una pipe (syscall pipe).
+    * argomenti:
+    *   fds: 8 byte in cui scrivere i due descrittori come int, prima quello
+    *     di lettura e poi quello di scrittura
+    * return: 0 se riuscita, negativo in caso di errore
+    */
+#ifdef __aarch64__
+    asminline(
+        mov x1, 0
+        mov x8, SYS_PIPE2
+        svc #0
+    ) endasm
+#else
+    asminline(
+        mov rax, SYS_PIPE
+        syscall
+    ) endasm
+#endif
+
+
+def package_manager_name() -> str:
+    /*
+    * Cerca il gestore di pacchetti del sistema fra quelli noti, dal percorso
+    * standard del suo eseguibile.
+    * return: il comando ("apt", "dnf", "yum", "pacman", "zypper", "apk",
+    *   "xbps-install" o "emerge"), "" se non ne trova
+    */
+    if sys_access("/usr/bin/apt", X_OK) == 0:
+        return "apt"
+
+    if sys_access("/usr/bin/dnf", X_OK) == 0:
+        return "dnf"
+
+    if sys_access("/usr/bin/yum", X_OK) == 0:
+        return "yum"
+
+    if sys_access("/usr/bin/pacman", X_OK) == 0:
+        return "pacman"
+
+    if sys_access("/usr/bin/zypper", X_OK) == 0:
+        return "zypper"
+
+    if sys_access("/sbin/apk", X_OK) == 0:
+        return "apk"
+
+    if sys_access("/usr/bin/apk", X_OK) == 0:
+        return "apk"
+
+    if sys_access("/usr/bin/xbps-install", X_OK) == 0:
+        return "xbps-install"
+
+    if sys_access("/usr/bin/emerge", X_OK) == 0:
+        return "emerge"
+    return ""
+
+
+def which(name: str) -> str:
+    /*
+    * Cerca un eseguibile nelle directory di PATH, come il comando which; un
+    * nome che contiene '/' viene solo controllato.
+    * argomenti:
+    *   name: il nome dell'eseguibile
+    * return: il percorso trovato, "" se non c'e'
+    */
+    if name == "":
+        return ""
+
+    if find_char(name, '/') != -1:
+        if sys_access(name, X_OK) == 0:
+            return name
+        return ""
+
+    path = getenv("PATH")
+    offset = 0 as long
+    while offset != -1:
+        offset, dir = split_next(path, ":", offset)
+        if dir == "":
+            continue
+
+        full_path = dir + "/" + name
+        if sys_access(full_path, X_OK) == 0:
+            return full_path
+
+    return ""
+
+
+def arg_at(index: int) -> str:
+    /*
+    * Restituisce un argomento della riga di comando; con un indice fuori dai
+    * limiti il programma termina con un errore.
+    * argomenti:
+    *   index: l'indice, da 0 (il nome del programma) a arg_count() - 1
+    * return: l'argomento
+    */
+#ifdef __aarch64__
+    asminline(
+        sxtw x19, w0
+        mov x0, x19
+        adrp x9, argc
+        ldr x1, [x9, :lo12:argc]
+        bl rt_check_array_bounds
+        adrp x9, argv
+        ldr x9, [x9, :lo12:argv]
+        ldr x0, [x9, x19, lsl 3]
+    ) endasm
+#else
+    asminline(
+        push rdi
+
+        mov rsi, [argc]
+        call rt_check_array_bounds
+
+        pop rdi
+        mov rax, [argv]
+        mov rax, [rax + rdi * 8]
+    ) endasm
+#endif
+
+
+def getenv(name: str) -> str:
+    /*
+    * Legge una variabile d'ambiente.
+    * argomenti:
+    *   name: il nome, es. "HOME"
+    * return: il valore, "" se non c'e'
+    */
+    n = strlen(name)
+    i = 0
+    unsafe:
+        entries = raw_envp() as ptr long
+
+    while entries[i] != (0 as long):
+        unsafe:
+            entry = entries[i] as str
+
+        if startswith(entry, name) and entry[n] == '=':
+            unsafe:
+                value = (entry + n + 1) as ptr char
+            return str_from_c(value)
+        i++
+    return ""
+
+
+def cwd() -> str:
+    /*
+    * Restituisce la directory di lavoro corrente.
+    * return: il percorso assoluto
+    */
+#ifdef __aarch64__
+    asminline(
+        mov x0, OS_PATH_MAX
+        bl rt_alloc
+        mov x19, x0
+        mov x1, OS_PATH_MAX
+        bl sys_getcwd
+        mov x0, x19
+    ) endasm
+#else
+    asminline(
+        mov rdi, OS_PATH_MAX
+        call rt_alloc
+        mov r8, rax
+
+        mov rdi, r8
+        mov rsi, OS_PATH_MAX
+        call sys_getcwd
+
+        mov rax, r8
+
+    ) endasm
+#endif
+
+
+def uname_field(offset: int) -> str:
+    /*
+    * Legge un campo di uname: alloca il buffer, chiama sys_uname e
+    * restituisce il campo all'offset dato.
+    * argomenti:
+    *   offset: l'offset del campo, UTSNAME_OFF_*
+    * return: il campo
+    */
+#ifdef __aarch64__
+    asminline(
+        sxtw x20, w0
+        mov x0, UTSNAME_TOTAL_SIZE
+        bl rt_alloc
+        mov x19, x0
+        bl sys_uname
+        add x0, x19, x20
+    ) endasm
+#else
+    asminline(
+        push rdi
+
+        mov rdi, UTSNAME_TOTAL_SIZE
+        call rt_alloc
+        mov r8, rax
+
+        push r8
+
+        mov rdi, r8
+        call sys_uname
+
+        pop r8
+        pop rdi
+
+        lea rax, [r8 + rdi]
+
+    ) endasm
+#endif
+
+
+def to_absolute_path(path: str) -> str:
+    /*
+    * Rende assoluto un percorso relativo alla directory di lavoro, togliendo
+    * un "./" iniziale.
+    * argomenti:
+    *   path: il percorso
+    * return: il percorso assoluto: path se lo era gia', la directory di
+    *   lavoro se path e' ""
+    */
+    len_path = strlen(path)
+    if len_path == 0:
+        return cwd()
+    
+    if path[0] == '/':
+        return path
+
+    rel = path
+
+    if len_path >= 2:
+        if path[0] == '.':
+            if path[1] == '/':
+                rel = path + 2
+
+    return cwd() + "/" + rel
+
+
+def exe_path() -> str:
+    /*
+    * Restituisce il percorso del programma in esecuzione, da /proc/self/exe.
+    * return: il percorso assoluto, "" in caso di errore (es. /proc non
+    *   montato)
+    */
+    buf = rt_alloc_up(OS_PATH_MAX)
+    written = sys_readlink("/proc/self/exe", buf, OS_PATH_MAX)
+    if written < 0:
+        return ""
+
+    buf[written] = '\0'
+    return buf

@@ -1,0 +1,124 @@
+
+/*
+* Linux: i wrapper verso le funzioni del runtime per dict e
+* sdict.
+*/
+
+def dict_probe_get(d: str, key: str, key_hash: int) -> str:
+    /*
+    * Cerca una chiave nella tabella di un dict (rt_dict_probe_get).
+    * argomenti:
+    *   d: la tabella
+    *   key: la chiave
+    *   key_hash: dict_hash(key)
+    * return: lo slot della chiave, 0 se non c'e'
+    */
+#ifdef __aarch64__
+    asminline(
+        bl rt_dict_probe_get
+    ) endasm
+#else
+    asminline(
+        call rt_dict_probe_get
+    )endasm
+#endif
+
+
+def dict_probe_set(d: str, key: str, key_hash: int) -> str:
+    /*
+    * Trova lo slot di una chiave nella tabella di un dict, o ne occupa uno
+    * libero con chiave e hash (rt_dict_probe_set).
+    * argomenti:
+    *   d: la tabella
+    *   key: la chiave
+    *   key_hash: dict_hash(key)
+    * return: lo slot, 0 se la tabella e' piena
+    */
+#ifdef __aarch64__
+    asminline(
+        bl rt_dict_probe_set
+    ) endasm
+#else
+    asminline(
+        call rt_dict_probe_set
+    )endasm
+#endif
+
+
+def dict_hash(key: str) -> int:
+    /*
+    * Calcola l'hash di una stringa per i dict (rt_str_hash).
+    * argomenti:
+    *   key: la stringa
+    * return: l'hash, a 31 bit e quindi mai negativo
+    */
+#ifdef __aarch64__
+    asminline(
+        bl rt_str_hash
+    ) endasm
+#else
+    asminline (
+        call rt_str_hash
+    ) endasm
+#endif
+
+
+def sdict_probe_get(d: str, key: str, key_hash: int) -> str:
+    /*
+    * Cerca una chiave nella tabella di un sdict (rt_sdict_probe_get).
+    * argomenti:
+    *   d: la tabella
+    *   key: la chiave
+    *   key_hash: dict_hash(key)
+    * return: lo slot della chiave, 0 se non c'e'
+    */
+#ifdef __aarch64__
+    asminline(
+        bl rt_sdict_probe_get
+    ) endasm
+#else
+    asminline(
+        call rt_sdict_probe_get
+    )endasm
+#endif
+
+
+def sdict_probe_set(d: str, key: str, key_hash: int) -> str:
+    /*
+    * Trova lo slot di una chiave nella tabella di un sdict, o ne occupa uno
+    * libero con chiave e hash (rt_sdict_probe_set).
+    * argomenti:
+    *   d: la tabella
+    *   key: la chiave
+    *   key_hash: dict_hash(key)
+    * return: lo slot, 0 se la tabella e' piena
+    */
+#ifdef __aarch64__
+    asminline(
+        bl rt_sdict_probe_set
+    ) endasm
+#else
+    asminline(
+        call rt_sdict_probe_set
+    )endasm
+#endif
+
+
+def sdict_find(d: str, key: str) -> str:
+    /*
+    * Cerca una chiave nella tabella di un sdict, calcolandone anche l'hash
+    * (rt_sdict_find).
+    * argomenti:
+    *   d: la tabella
+    *   key: la chiave
+    * return: lo slot della chiave, 0 se non c'e'
+    */
+#ifdef __aarch64__
+    asminline(
+        bl rt_sdict_find
+    ) endasm
+#else
+    asminline(
+        call rt_sdict_find
+    )endasm
+#endif

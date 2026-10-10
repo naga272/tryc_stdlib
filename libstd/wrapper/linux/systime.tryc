@@ -1,0 +1,183 @@
+#ifdef __aarch64__
+#define SYS_CLOCK_SETTIME 112
+#define SYS_CLOCK_GETTIME 113
+#define SYS_CLOCK_GETRES 114
+#define SYS_CLOCK_NANOSLEEP 115
+#else
+#define SYS_CLOCK_SETTIME 227
+#define SYS_CLOCK_GETTIME 228
+#define SYS_CLOCK_GETRES 229
+#define SYS_CLOCK_NANOSLEEP 230
+#endif
+
+
+#ifndef CLOCK_REALTIME
+/*
+* Esprime i secondi passati dall' 1 Gennaio 1970 (Epoch Unix)
+*/
+#define CLOCK_REALTIME 0
+#endif
+
+#ifndef CLOCK_MONOTONIC
+/*
+* Orologio che garantisce di andare sempre e solo in avanti a
+* velocita' costante.
+* Parte dal momento del boot del sistema e
+* si blocca quando la macchina va in standby.
+*/
+#define CLOCK_MONOTONIC 1
+#endif
+
+#ifndef CLOCK_MONOTONIC_RAW
+/*
+* Non viene influenzato o manipolato dagli aggiustamenti
+* di frequenza del demone NTP.
+*/
+#define CLOCK_MONOTONIC_RAW 4
+#endif
+
+#ifndef CLOCK_BOOTTIME
+/*
+* Include il tempo in cui il sistema e' rimasto sospeso/addormentato (suspend/sleep).
+*/
+#define CLOCK_BOOTTIME 7
+#endif
+
+#ifndef CLOCK_PROCESS_CPUTIME_ID
+/*
+* Misura il tempo di CPU consumato dal processo attuale
+* (sommando l'attivita' di tutti i suoi thread).
+* Se il processo viene messo in pausa dal sistema operativo
+* il contatore si ferma.
+*/
+#define CLOCK_PROCESS_CPUTIME_ID 2
+#endif
+
+#ifndef CLOCK_THREAD_CPUTIME_ID
+/*
+* Misura il tempo di CPU consumato esclusivamente dal singolo thread
+* che ha effettuato la chiamata.
+*/
+#define CLOCK_THREAD_CPUTIME_ID 3
+#endif
+
+#ifndef TIMER_RELATIVE
+/* flag per sys_clock_nanosleep:
+* richiesta relativa, dorme per 'request' unita' di tempo a partire da ora 
+* (il caso comune, vedi sleep_ms)
+*/
+#define TIMER_RELATIVE 0
+#endif
+
+#ifndef TIMER_ABSTIME
+/*
+* flag per sys_clock_nanosleep:
+* dorme fino all'istante 'request' sull'orologio 'which_clock',
+*/
+#define TIMER_ABSTIME 1
+#endif
+
+
+class Timeval --no-padding:
+    tv_sec int
+    tv_usec long
+
+
+// struct timespec: secondi e nanosecondi (da 0 a 999999999), 8 byte
+// ciascuno
+
+class Timespec --no-padding:
+    tv_sec  long
+    tv_nsec long
+
+
+def sys_clock_settime(which_clock: int, tp: Timespec) -> None:
+    /*
+    * Imposta un orologio di sistema (syscall clock_settime); richiede i
+    * privilegi di amministratore.
+    * argomenti:
+    *   which_clock: l'orologio, es. CLOCK_REALTIME
+    *   tp: il nuovo valore
+    * return: nessuno (procedura)
+    */
+#ifdef __aarch64__
+    asminline(
+        mov x8, SYS_CLOCK_SETTIME
+        svc #0
+    ) endasm
+#else
+    asminline(
+        mov rax, SYS_CLOCK_SETTIME
+        syscall
+    ) endasm
+#endif
+
+
+def sys_clock_gettime(which_clock: int, tp: Timespec) -> None:
+    /*
+    * Legge un orologio (syscall clock_gettime).
+    * argomenti:
+    *   which_clock: l'orologio, es. CLOCK_REALTIME o CLOCK_MONOTONIC
+    *   tp: dove scrivere il valore
+    * return: nessuno (procedura)
+    */
+#ifdef __aarch64__
+    asminline(
+        mov x8, SYS_CLOCK_GETTIME
+        svc #0
+    ) endasm
+#else
+    asminline(
+        mov rax, SYS_CLOCK_GETTIME
+        syscall
+    ) endasm
+#endif
+
+
+def sys_clock_getres(which_clock: int, tp: Timespec) -> None:
+    /*
+    * Legge la risoluzione di un orologio (syscall clock_getres).
+    * argomenti:
+    *   which_clock: l'orologio
+    *   tp: dove scrivere la risoluzione
+    * return: nessuno (procedura)
+    */
+#ifdef __aarch64__
+    asminline(
+        mov x8, SYS_CLOCK_GETRES
+        svc #0
+    ) endasm
+#else
+    asminline(
+        mov rax, SYS_CLOCK_GETRES
+        syscall
+    ) endasm
+#endif
+
+
+def sys_clock_nanosleep(which_clock: int, flags: int, request: Timespec, remain: Timespec) -> int:
+    /*
+    * Sospende l'esecuzione per un intervallo, o fino a un istante con
+    * TIMER_ABSTIME (syscall clock_nanosleep).
+    * argomenti:
+    *   which_clock: l'orologio di riferimento
+    *   flags: TIMER_RELATIVE o TIMER_ABSTIME
+    *   request: la durata, o l'istante
+    *   remain: dove il kernel scrive il tempo che restava se un segnale
+    *     interrompe l'attesa; serve sempre un Timespec
+    * return: 0 se riuscita, negativo in caso di errore o interruzione
+    */
+#ifdef __aarch64__
+    asminline(
+        mov x8, SYS_CLOCK_NANOSLEEP
+        svc #0
+    ) endasm
+#else
+    asminline(
+        mov r10, rcx
+        push rcx
+        mov rax, SYS_CLOCK_NANOSLEEP
+        syscall
+        pop rcx
+    ) endasm
+#endif

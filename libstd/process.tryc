@@ -1,0 +1,48 @@
+#include <libstd/macro>
+
+#ifdef __unix__
+#include <libstd/wrapper/linux/process>
+#else
+#include <libstd/wrapper/windows/process>
+#endif
+
+
+def fork() -> int:
+    /*
+    * Crea un processo figlio, copia del processo corrente. Su errore stampa
+    * un messaggio.
+    * return: 0 nel figlio, il pid del figlio nel padre, negativo su errore
+    */
+    pid = sys_fork()
+    if pid < 0:
+        print("error, pid value: " + itoa(pid) + "\n")
+    return pid
+
+
+def raw_envp() -> str:
+    /*
+    * Restituisce l'array envp del processo, da passare a sys_execve per
+    * ereditare l'ambiente.
+    * return: l'indirizzo del primo elemento di envp
+    */
+#ifdef __aarch64__
+    asminline(
+        adrp x9, envp
+        ldr x0, [x9, :lo12:envp]
+    ) endasm
+#else
+    asminline(
+        mov rax, [envp]
+    ) endasm
+#endif
+
+
+def run_shell_command(cmd: str) -> int:
+    /*
+    * Esegue un comando con '/bin/sh -c' al posto del processo corrente, come
+    * execve: se riesce non ritorna.
+    * argomenti:
+    *   cmd: il comando, es. "ls -l"
+    * return: un valore negativo se il comando non parte
+    */
+    return exec_shell(cmd)

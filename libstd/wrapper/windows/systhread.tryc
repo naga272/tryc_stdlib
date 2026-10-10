@@ -1,0 +1,145 @@
+/*
+* Windows x64: i thread con CreateThread, le stesse systhread_* di
+* wrapper/linux/systhread per libstd/thread (i campi SB_* sono li'). Lo
+* stack lo gestisce Windows. Il blocco di sincronizzazione viene da
+* VirtualAlloc e non da raw_alloc: su Windows raw_alloc e raw_free
+* aggiornano una tabella globale del runtime (le regioni da copiare in
+* un fork) senza lock, e un thread staccato libera il suo blocco mentre
+* gli altri allocano.
+*/
+
+#include <libstd/wrapper/windows/kernel32>
+
+// dwStackSize e' la riserva per lo stack, come la dimensione su Linux
+#define STACK_SIZE_PARAM_IS_A_RESERVATION 65536
+
+#define SYSTHREAD_MEM_COMMIT_RESERVE 12288      // MEM_COMMIT | MEM_RESERVE
+#define SYSTHREAD_PAGE_READWRITE 4
+#define SYSTHREAD_MEM_RELEASE 32768
+
+extern def CreateThread(attributes: long, stack_size: long, start: long, param: str, flags: int, thread_id: str) -> long
+extern def VirtualAlloc(address: long, size: long, allocation_type: int, protect: int) -> str
+extern def VirtualFree(address: str, size: long, free_type: int) -> int
+
+
+def systhread_start_routine() -> long:
+    /*
+    * Restituisce l'indirizzo da cui CreateThread fa partire il thread: un
+    * pezzo di asm che esegue entry_fn(arg, stop) e poi, come su Linux, passa
+    * SB_STATE da SB_RUNNING a SB_FINISHED o, se trova SB_DETACHED, libera il
+    * blocco. Non e' una funzione TryC perche' il suo prologo aprirebbe uno
+    * scope nell'arena, che non e' thread-safe.
+    * return: l'indirizzo
+    */
+    asminline(
+        lea rax, [rip + .thread_start]
+        jmp .out
+
+        .thread_start:
+            push rbx
+            push rsi
+            sub rsp, 40
+            mov rbx, rcx
+            mov rcx, [rbx + SB_ARG]
+            lea rdx, [rbx + SB_STOP]
+            call qword [rbx + SB_ENTRY]
+            mov [rbx + SB_EXIT], eax
+            mov esi, eax
+            xor eax, eax
+            mov ecx, SB_FINISHED
+            lock cmpxchg dword [rbx + SB_STATE], ecx
+            je .finished
+            mov rcx, rbx
+            xor edx, edx
+            mov r8d, SYSTHREAD_MEM_RELEASE
+            call VirtualFree
+            .finished:
+            mov eax, esi
+            add rsp, 40
+            pop rsi
+            pop rbx
+            ret
+    ) endasm
+
+
+def systhread_alloc(stack_size: int) -> str:
+    /*
+    * Alloca il blocco di sincronizzazione con VirtualAlloc, gia' a zero; lo
+    * stack lo gestisce Windows.
+    * argomenti:
+    *   stack_size: i byte di stack, per systhread_start
+    * return: il blocco, 0 se manca memoria
+    */
+    sync = VirtualAlloc(0 as long, SB_SIZE as long, SYSTHREAD_MEM_COMMIT_RESERVE, SYSTHREAD_PAGE_READWRITE)
+    if sync == 0:
+        return sync
+    poke_long(sync + SB_REGION_SIZE, stack_size as long)
+    return sync
+
+
+def systhread_start(entry_fn: &(long, long) -> int, arg: long, sync: str) -> int:
+    /*
+    * Fa partire entry_fn(arg, stop) su un thread nuovo (CreateThread).
+    * argomenti:
+    *   entry_fn: la funzione del thread
+    *   arg: il primo argomento di entry_fn; il secondo e' l'indirizzo di
+    *     SB_STOP (thread_stop_requested)
+    *   sync: il blocco di systhread_alloc
+    * return: l'id del thread (> 0), -errno se CreateThread fallisce
+    */
+    unsafe:
+        poke_long(sync + SB_ENTRY, entry_fn as long)
+    poke_long(sync + SB_ARG, arg)
+
+    handle = CreateThread(0 as long, peek_long(sync + SB_REGION_SIZE), systhread_start_routine(), sync, STACK_SIZE_PARAM_IS_A_RESERVATION, sync + SB_TID)
+    if handle == (0 as long):
+        return win_error(GetLastError())
+    poke_long(sync + SB_HANDLE, handle)
+    return peek_int(sync + SB_TID)
+
+
+def systhread_handle(sync: str) -> long:
+    /*
+    * Restituisce l'HANDLE del thread, da leggere prima che il thread possa
+    * liberare il blocco.
+    * argomenti:
+    *   sync: il blocco di systhread_alloc
+    * return: l'HANDLE
+    */
+    return peek_long(sync + SB_HANDLE)
+
+
+def systhread_wait(sync: str, os_handle: long) -> None:
+    /*
+    * Aspetta che il thread sia uscito.
+    * argomenti:
+    *   sync: il blocco di systhread_alloc
+    *   os_handle: l'HANDLE, da systhread_handle
+    * return: nessuno (procedura)
+    */
+    WaitForSingleObject(os_handle, INFINITE)
+
+
+def systhread_release(sync: str, os_handle: long) -> None:
+    /*
+    * Chiude l'HANDLE e libera il blocco, dopo systhread_wait o se
+    * CreateThread e' fallita.
+    * argomenti:
+    *   sync: il blocco di systhread_alloc
+    *   os_handle: l'HANDLE, 0 se CreateThread e' fallita
+    * return: nessuno (procedura)
+    */
+    if os_handle != (0 as long):
+        CloseHandle(os_handle)
+    VirtualFree(sync, 0 as long, SYSTHREAD_MEM_RELEASE)
+
+
+def systhread_detached(os_handle: long) -> None:
+    /*
+    * Chiude l'HANDLE di un thread staccato: il thread va avanti da solo e
+    * alla fine libera il blocco.
+    * argomenti:
+    *   os_handle: l'HANDLE
+    * return: nessuno (procedura)
+    */
+    CloseHandle(os_handle)

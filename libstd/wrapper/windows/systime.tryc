@@ -1,0 +1,261 @@
+/*
+* Windows x64: gli orologi di libstd/time con kernel32. Costanti e classi
+* sono le stesse di wrapper/linux/systime: i numeri dei clock di Linux,
+* che qui scelgono la fonte.
+*/
+
+#include <libstd/wrapper/windows/kernel32>
+
+#ifndef CLOCK_REALTIME
+/*
+* Esprime i secondi passati dall' 1 Gennaio 1970 (Epoch Unix)
+*/
+#define CLOCK_REALTIME 0
+#endif
+
+#ifndef CLOCK_MONOTONIC
+/*
+* Orologio che garantisce di andare sempre e solo in avanti a
+* velocita' costante.
+* Parte dal momento del boot del sistema e
+* si blocca quando il PC va in standby.
+*/
+#define CLOCK_MONOTONIC 1
+#endif
+
+#ifndef CLOCK_MONOTONIC_RAW
+/*
+* Non viene influenzato o manipolato dagli aggiustamenti
+* di frequenza del demone NTP.
+*/
+#define CLOCK_MONOTONIC_RAW 4
+#endif
+
+#ifndef CLOCK_BOOTTIME
+/*
+* Include il tempo in cui il sistema e' rimasto sospeso/addormentato (suspend/sleep).
+*/
+#define CLOCK_BOOTTIME 7
+#endif
+
+#ifndef CLOCK_PROCESS_CPUTIME_ID
+/*
+* Misura il tempo di CPU consumato dal processo attuale (sommando
+* l'attivita' di tutti i suoi thread).
+* Se il processo viene messo in pausa dal sistema operativo
+* il contatore si ferma.
+*/
+#define CLOCK_PROCESS_CPUTIME_ID 2
+#endif
+
+#ifndef CLOCK_THREAD_CPUTIME_ID
+/*
+* Misura il tempo di CPU consumato esclusivamente dal singolo thread
+* che ha effettuato la chiamata.
+*/
+#define CLOCK_THREAD_CPUTIME_ID 3
+#endif
+
+#ifndef TIMER_RELATIVE
+/* flag per sys_clock_nanosleep: richiesta relativa, dorme per
+* 'request' unita' di tempo a partire da ora 
+* (il caso comune, vedi sleep_ms)
+*/
+#define TIMER_RELATIVE 0
+#endif
+
+#ifndef TIMER_ABSTIME
+/*
+* flag per sys_clock_nanosleep: richiesta ASSOLUTA, dorme FINO
+* all'istante 'request' sull'orologio 'which_clock',
+* non per una durata
+*/
+#define TIMER_ABSTIME 1
+#endif
+
+
+class Timeval --no-padding:
+    tv_sec long
+    tv_usec long
+
+
+// struct timespec: secondi e nanosecondi (da 0 a 999999999), 8 byte
+// ciascuno
+
+class Timespec --no-padding:
+    tv_sec  long
+    tv_nsec long
+
+
+// FILETIME: 100 ns dal 1601; dal 1970 e' 116444736000000000
+#define WIN_TICKS_PER_SECOND 10000000
+#define WIN_NS_PER_TICK 100
+
+// CreateWaitableTimerExW: piu' preciso del millisecondo di Sleep
+#define CREATE_WAITABLE_TIMER_HIGH_RESOLUTION 2
+#define TIMER_ALL_ACCESS 2031619
+
+
+extern def GetSystemTimePreciseAsFileTime(time: &long) -> None
+extern def QueryPerformanceCounter(counter: &long) -> int
+extern def QueryPerformanceFrequency(frequency: &long) -> int
+extern def GetProcessTimes(process: long, creation: &long, exit: &long, kernel: &long, user: &long) -> int
+extern def GetCurrentThread() -> long
+extern def GetThreadTimes(thread: long, creation: &long, exit: &long, kernel: &long, user: &long) -> int
+extern def CreateWaitableTimerExW(attributes: long, name: long, flags: int, access: int) -> long
+extern def SetWaitableTimer(timer: long, due: &long, period: int, routine: long, argument: long, resume: int) -> int
+extern def FileTimeToSystemTime(file_time: &long, system_time: str) -> int
+extern def SetSystemTime(system_time: str) -> int
+
+
+def win_set_timespec(tp: Timespec, ticks: long) -> None:
+    /*
+    * Scrive in un Timespec un tempo in tick da 100 ns.
+    * argomenti:
+    *   tp: il Timespec
+    *   ticks: il tempo
+    * return: nessuno (procedura)
+    */
+    second = WIN_TICKS_PER_SECOND as long
+    tp.tv_sec = ticks / second
+    tp.tv_nsec = (ticks % second) * (WIN_NS_PER_TICK as long)
+
+
+def win_ticks(tp: Timespec) -> long:
+    /*
+    * Converte un Timespec in tick da 100 ns.
+    * argomenti:
+    *   tp: il Timespec
+    * return: i tick
+    */
+    return tp.tv_sec * (WIN_TICKS_PER_SECOND as long) + tp.tv_nsec / (WIN_NS_PER_TICK as long)
+
+
+def win_monotonic_ticks() -> long:
+    /*
+    * Legge il contatore monotono (QueryPerformanceCounter) in tick da 100
+    * ns.
+    * return: i tick
+    */
+    counter = 0 as long
+    frequency = 0 as long
+    QueryPerformanceCounter(&counter)
+    QueryPerformanceFrequency(&frequency)
+    second = WIN_TICKS_PER_SECOND as long
+    return (counter / frequency) * second + ((counter % frequency) * second) / frequency
+
+
+def win_realtime_ticks() -> long:
+    /*
+    * Legge l'ora di sistema in tick da 100 ns dal 1970.
+    * return: i tick
+    */
+    now_1601 = 0 as long
+    GetSystemTimePreciseAsFileTime(&now_1601)
+    return now_1601 - (116444736000000000 as long)
+
+
+def sys_clock_settime(which_clock: int, tp: Timespec) -> None:
+    /*
+    * Imposta l'ora di sistema, come clock_settime di Linux: solo
+    * CLOCK_REALTIME, con SetSystemTime. Richiede i privilegi di
+    * amministratore.
+    * argomenti:
+    *   which_clock: l'orologio; un orologio diverso da CLOCK_REALTIME viene
+    *     ignorato
+    *   tp: il nuovo valore
+    * return: nessuno (procedura)
+    */
+    if which_clock != CLOCK_REALTIME:
+        return
+
+    file_time = win_ticks(tp) + (116444736000000000 as long)
+    system_time = rt_alloc_up(16)
+    if FileTimeToSystemTime(&file_time, system_time) != 0:
+        SetSystemTime(system_time)
+
+
+def sys_clock_gettime(which_clock: int, tp: Timespec) -> None:
+    /*
+    * Legge un orologio, come clock_gettime di Linux: CLOCK_REALTIME
+    * dall'ora di sistema, i tempi di CPU (kernel e utente) da
+    * GetProcessTimes e GetThreadTimes, gli altri da QueryPerformanceCounter.
+    * argomenti:
+    *   which_clock: l'orologio, es. CLOCK_REALTIME o CLOCK_MONOTONIC
+    *   tp: dove scrivere il valore
+    * return: nessuno (procedura)
+    */
+    creation = 0 as long
+    exit_time = 0 as long
+    kernel = 0 as long
+    user = 0 as long
+
+    if which_clock == CLOCK_REALTIME:
+        win_set_timespec(tp, win_realtime_ticks())
+    elif which_clock == CLOCK_PROCESS_CPUTIME_ID:
+        GetProcessTimes(GetCurrentProcess(), &creation, &exit_time, &kernel, &user)
+        win_set_timespec(tp, kernel + user)
+    elif which_clock == CLOCK_THREAD_CPUTIME_ID:
+        GetThreadTimes(GetCurrentThread(), &creation, &exit_time, &kernel, &user)
+        win_set_timespec(tp, kernel + user)
+    else:
+        win_set_timespec(tp, win_monotonic_ticks())
+
+
+def sys_clock_getres(which_clock: int, tp: Timespec) -> None:
+    /*
+    * Legge la risoluzione di un orologio, come clock_getres di Linux: 100 ns
+    * per l'ora e i tempi di CPU, un tick del contatore per gli orologi
+    * monotoni.
+    * argomenti:
+    *   which_clock: l'orologio
+    *   tp: dove scrivere la risoluzione
+    * return: nessuno (procedura)
+    */
+    tp.tv_sec = 0 as long
+    tp.tv_nsec = WIN_NS_PER_TICK as long
+    if which_clock == CLOCK_MONOTONIC or which_clock == CLOCK_MONOTONIC_RAW or which_clock == CLOCK_BOOTTIME:
+        frequency = 0 as long
+        QueryPerformanceFrequency(&frequency)
+        tp.tv_nsec = (1000000000 as long) / frequency
+        if tp.tv_nsec == 0 as long:
+            tp.tv_nsec = 1 as long
+
+
+def sys_clock_nanosleep(which_clock: int, flags: int, request: Timespec, remain: Timespec) -> int:
+    /*
+    * Sospende l'esecuzione per un intervallo, o fino a un istante con
+    * TIMER_ABSTIME, come clock_nanosleep di Linux, con un timer ad alta
+    * risoluzione. Su Windows l'attesa non si interrompe.
+    * argomenti:
+    *   which_clock: l'orologio di riferimento
+    *   flags: TIMER_RELATIVE o TIMER_ABSTIME
+    *   request: la durata, o l'istante
+    *   remain: viene azzerato
+    * return: 0, -errno se il timer non si crea
+    */
+    remain.tv_sec = 0 as long
+    remain.tv_nsec = 0 as long
+
+    due = 0 as long - win_ticks(request)
+    if (flags & TIMER_ABSTIME) != 0:
+        if which_clock == CLOCK_REALTIME:
+            due = win_ticks(request) - win_realtime_ticks()
+        else:
+            due = win_ticks(request) - win_monotonic_ticks()
+        due = 0 as long - due
+
+    if due >= 0 as long:
+        return 0
+
+    timer = CreateWaitableTimerExW(0 as long, 0 as long, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS)
+    if timer == 0 as long:
+        timer = CreateWaitableTimerExW(0 as long, 0 as long, 0, TIMER_ALL_ACCESS)
+    if timer == 0 as long:
+        return win_error(GetLastError())
+
+    if SetWaitableTimer(timer, &due, 0, 0 as long, 0 as long, 0) != 0:
+        WaitForSingleObject(timer, INFINITE)
+
+    CloseHandle(timer)
+    return 0

@@ -1,0 +1,631 @@
+
+/*
+* Linux: le syscall su file e file descriptor per libstd/file.
+*/
+
+#ifdef __aarch64__
+// aarch64 (asm-generic/unistd.h) non ha open, stat, lstat, poll, access e
+// dup2: le sys_* sotto usano openat, newfstatat, faccessat e dup3
+#define SYS_OPENAT 56
+#define SYS_CLOSE 57
+#define SYS_NEWFSTATAT 79
+#define SYS_FSTAT 80
+#define SYS_LSEEK 62
+#define SYS_IOCTL 29
+#define SYS_PREAD64 67
+#define SYS_FACCESSAT 48
+#define SYS_FCNTL 25
+#define SYS_DUP 23
+#define SYS_SHUTDOWN 210
+#define SYS_DUP3 24
+
+#ifndef AT_FDCWD
+// il percorso relativo alla directory corrente, per le syscall *at
+#define AT_FDCWD -100
+#endif
+
+#ifndef F_GETFD
+#define F_GETFD 1
+#endif
+#else
+#define SYS_OPEN 2
+#define SYS_CLOSE 3
+#define SYS_STAT 4
+#define SYS_FSTAT 5
+#define SYS_LSTAT 6
+#define SYS_POLL 7
+#define SYS_LSEEK 8
+#define SYS_IOCTL 16
+#define SYS_PREAD64 17
+#define SYS_ACCESS 21
+#define SYS_DUP 32
+#define SYS_DUP2 33
+#define SYS_SHUTDOWN 48
+#define SYS_DUP3 292
+#endif
+
+#ifndef O_CREAT
+#define O_CREAT 0o100   // ottale = 64
+#endif
+
+#ifndef O_TRUNC
+#define O_TRUNC 0o1000  // ottale = 512
+#endif
+
+#ifndef O_EXCL
+#define O_EXCL 0o200   // con O_CREAT: fallisce se il file esiste
+#endif
+
+#ifndef O_NOCTTY
+#define O_NOCTTY 0o400   // non diventare il terminale di controllo
+#endif
+
+#ifndef O_APPEND
+#define O_APPEND 0o2000  // ottale = 1024
+#endif
+
+// Access mode
+#ifndef O_RDONLY
+#define O_RDONLY      0    // sola lettura
+#endif
+
+#ifndef O_WRONLY
+#define O_WRONLY      1    // sola scrittura
+#endif
+
+#ifndef O_RDWR
+#define O_RDWR        2    // lettura e scrittura
+#endif
+
+#ifndef O_ACCMODE
+#define O_ACCMODE     3    // mask per i 3 sopra
+#endif
+
+#ifndef CLASSIS
+#define CLASSIS 420   // lettura / scrittura file di testo classici
+#endif
+
+#ifndef O_OWNER
+#define O_OWNER 384   // solo owner
+#endif
+
+#ifndef CLASSIC
+#define CLASSIC 420   // lettura / scrittura file di testo classici
+#endif
+
+#ifndef BINARY
+#define BINARY  493   // eseguibile pubblico
+#endif
+
+#ifndef S_IXUSR
+#define S_IXUSR 64    // execute by owner
+#endif
+
+#ifndef S_IWUSR
+#define S_IWUSR 128   // write by owner
+#endif
+
+#ifndef S_IRUSR
+#define S_IRUSR 256   // read by owner
+#endif
+
+#ifndef S_IXGRP
+#define S_IXGRP 8    // execute by group
+#endif
+
+#ifndef S_IWGRP
+#define S_IWGRP 16   // write by group
+#endif
+
+
+#ifndef S_IRGRP
+#define S_IRGRP 32   // read by group
+#endif
+
+#ifndef S_IXOTH
+#define S_IXOTH 1   // execute by others
+#endif
+
+#ifndef S_IWOTH
+#define S_IWOTH 2   // write by others
+#endif
+
+#ifndef S_IROTH
+#define S_IROTH 4   // read by others
+#endif
+
+// tipo del file in st_mode
+#ifndef S_IFIFO
+#define S_IFIFO 4096     // pipe
+#endif
+
+#ifndef S_IFCHR
+#define S_IFCHR 8192     // dispositivo a caratteri
+#endif
+
+#ifndef S_IFDIR
+#define S_IFDIR 16384    // directory
+#endif
+
+#ifndef S_IFREG
+#define S_IFREG 32768    // file normale
+#endif
+
+#ifndef S_IFMT
+#define S_IFMT 61440     // mask per i tipi sopra
+#endif
+
+// File status flags
+#ifndef O_APPEND
+#define O_APPEND      1024    // scrittura in append
+#endif
+
+#ifndef O_NONBLOCK
+#define O_NONBLOCK    2048    // I/O non bloccante
+#endif
+
+#ifndef O_DSYNC
+#define O_DSYNC       4096    // scritture sincrone (data)
+#endif
+
+#ifndef FASYNC
+#define FASYNC        8192    // notifica asincrona (obsolete)
+#endif
+
+#ifndef O_DIRECT
+#ifdef __aarch64__
+// su aarch64 vale diverso
+#define O_DIRECT      65536
+#else
+#define O_DIRECT      16384    // I/O diretto (salta il cache)
+#endif
+#endif
+
+#ifndef O_LARGEFILE
+#ifdef __aarch64__
+// su aarch64 vale diverso
+#define O_LARGEFILE   131072
+#else
+#define O_LARGEFILE   32768    // (compatibilità 32-bit)
+#endif
+#endif
+
+// Directory e symlink handling
+#ifndef O_DIRECTORY
+#ifdef __aarch64__
+// su aarch64 vale diverso
+#define O_DIRECTORY   16384
+#else
+#define O_DIRECTORY   65536     // deve essere una directory
+#endif
+#endif
+
+#ifndef O_NOFOLLOW
+#ifdef __aarch64__
+// su aarch64 vale diverso
+#define O_NOFOLLOW    32768
+#else
+#define O_NOFOLLOW    131072    // non seguire symlink
+#endif
+#endif
+
+#ifndef O_CLOEXEC
+#define O_CLOEXEC     524288    // close-on-exec (FD_CLOEXEC)
+#endif
+
+/*
+FLAGS PER SYS_SHUTDOWN
+*/
+
+#ifndef SHUT_RD
+/*
+* SHUT_RD
+* Chiude il canale in lettura.
+* Il processo non potra' piu' ricevere dati da questo socket.
+* Eventuali dati ancora nel buffer di ricezione o
+* che arriveranno in seguito verranno scartati dal kernel.
+*/
+#define SHUT_RD 0
+#endif
+
+#ifndef SHUT_WR
+/*
+* SHUT_WR
+* Chiude il canale in scrittura (il processo non puo' piu' inviare dati).
+* Il kernel invierà un pacchetto di terminazione (es. un flag FIN nel protocollo TCP)
+* all'altro capo della connessione per avvisarlo che la trasmissione è finita.
+* NB: si puo' ancora ricevere dati se l'altro endpoint ha ancora qualcosa da mandare
+*/
+#define SHUT_WR 1
+#endif
+
+#ifndef SHUT_RDWR
+/*
+* SHUT_RDWR
+* Chiude il canale sia in lettura che in scrittura.
+* Interrompe completamente ogni flusso in entrambe le direzioni.
+*/
+#define SHUT_RDWR 2
+#endif
+
+/*
+* La struct stat di x86_64 (144 byte), scritta da sys_stat e sys_fstat; su
+* aarch64 il kernel ne usa un'altra, copiata qui da a64_stat_copy.
+* st_size e' la dimensione in byte di un file normale, la lunghezza del
+* percorso di un link simbolico.
+*/
+class Stat --no-padding:
+    st_dev          long
+    st_ino          long
+    st_nlink        long
+    st_mode         int
+    st_uid          int
+    st_gid          int
+    pad0            int
+    st_rdev         long
+    st_size         long
+    st_blksize      long
+    st_blocks       long
+    st_atime        long
+    st_atime_nsec   long
+    st_mtime        long
+    st_mtime_nsec   long
+    st_ctime        long
+    st_ctime_nsec   long
+    reserved0       long
+    reserved1       long
+    reserved2       long
+
+
+#ifdef __aarch64__
+// la struct stat di aarch64 (asm-generic/stat.h): 128 byte, un altro
+// layout rispetto a Stat (quello di x86_64)
+#define A64_STAT_SIZE 128
+
+
+def sys_newfstatat(dirfd: int, path: str, raw: str, flags: int) -> int:
+    /*
+    * Legge le informazioni di un file nella struct stat di aarch64 (syscall
+    * newfstatat). Solo aarch64.
+    * argomenti:
+    *   dirfd: la directory di partenza, AT_FDCWD per quella corrente
+    *   path: il percorso
+    *   raw: il buffer, di A64_STAT_SIZE byte
+    *   flags: 0 per seguire i link simbolici
+    * return: 0 se riuscita, negativo in caso di errore
+    */
+    asminline(
+        mov x8, SYS_NEWFSTATAT
+        svc #0
+    ) endasm
+
+
+def sys_fstat_raw(fd: int, raw: str) -> int:
+    /*
+    * Legge le informazioni di un fd aperto nella struct stat di aarch64
+    * (syscall fstat). Solo aarch64.
+    * argomenti:
+    *   fd: il file descriptor
+    *   raw: il buffer, di A64_STAT_SIZE byte
+    * return: 0 se riuscita, negativo in caso di errore
+    */
+    asminline(
+        mov x8, SYS_FSTAT
+        svc #0
+    ) endasm
+
+
+def a64_stat_copy(raw: str, statbuf: Stat) -> None:
+    /*
+    * Copia la struct stat di aarch64 in uno Stat. Solo aarch64.
+    * argomenti:
+    *   raw: la struct letta dal kernel
+    *   statbuf: lo Stat da riempire
+    * return: nessuno (procedura)
+    */
+    unsafe:
+        v32 = raw as ptr int
+        v64 = raw as ptr long
+        statbuf.st_dev = v64[0]
+        statbuf.st_ino = v64[1]
+        statbuf.st_mode = v32[4]
+        statbuf.st_nlink = v32[5]
+        statbuf.st_uid = v32[6]
+        statbuf.st_gid = v32[7]
+        statbuf.pad0 = 0
+        statbuf.st_rdev = v64[4]
+        statbuf.st_size = v64[6]
+        statbuf.st_blksize = v32[14]
+        statbuf.st_blocks = v64[8]
+        statbuf.st_atime = v64[9]
+        statbuf.st_atime_nsec = v64[10]
+        statbuf.st_mtime = v64[11]
+        statbuf.st_mtime_nsec = v64[12]
+        statbuf.st_ctime = v64[13]
+        statbuf.st_ctime_nsec = v64[14]
+        statbuf.reserved0 = 0 as long
+        statbuf.reserved1 = 0 as long
+        statbuf.reserved2 = 0 as long
+#endif
+
+
+#ifndef F_OK
+// il file esiste
+#define F_OK 0
+#endif
+
+#ifndef R_OK
+#define R_OK 4
+#endif
+
+#ifndef W_OK
+#define W_OK 2
+#endif
+
+
+// richiesta di sys_ioctl: quanti byte sono gia' pronti da leggere su un fd
+#ifndef FIONREAD
+#define FIONREAD 21531
+#endif
+
+
+def sys_ioctl(fd: int, request: int, argp: &int) -> int:
+    /*
+    * Esegue un'operazione di controllo su un file descriptor (syscall
+    * ioctl).
+    * argomenti:
+    *   fd: il file descriptor
+    *   request: la richiesta, es. FIONREAD
+    *   argp: l'int con cui la richiesta riceve o restituisce il suo valore
+    * return: dipende dalla richiesta; negativo in caso di errore
+    */
+#ifdef __aarch64__
+    asminline(
+        mov x8, SYS_IOCTL
+        svc #0
+    ) endasm
+#else
+    asminline (
+        mov rax, SYS_IOCTL
+        syscall
+    ) endasm
+#endif
+
+
+def sys_access(path_file: str, mode: int) -> int:
+    /*
+    * Controlla se il processo puo' accedere a un file, senza aprirlo
+    * (syscall access).
+    * argomenti:
+    *   path_file: il percorso
+    *   mode: F_OK per l'esistenza, oppure R_OK, W_OK e X_OK in OR
+    * return: 0 se l'accesso e' consentito, negativo altrimenti
+    */
+#ifdef __aarch64__
+    asminline(
+        mov x2, x1
+        mov x1, x0
+        mov x0, AT_FDCWD
+        mov x8, SYS_FACCESSAT
+        svc #0
+    ) endasm
+#else
+    asminline(
+        mov rax, SYS_ACCESS
+        syscall
+    ) endasm
+#endif
+
+
+def sys_open(path: str, flags: int, mode: int) -> int:
+    /*
+    * Apre un file (syscall open).
+    * argomenti:
+    *   path: il percorso, assoluto o relativo
+    *   flags: O_RDONLY, O_WRONLY o O_RDWR, con eventuali O_CREAT, O_TRUNC,
+    *     O_APPEND...
+    *   mode: i permessi del file se viene creato, es. CLASSIC
+    * return: il file descriptor, negativo in caso di errore
+    */
+#ifdef __aarch64__
+    asminline(
+        mov x3, x2
+        mov x2, x1
+        mov x1, x0
+        mov x0, AT_FDCWD
+        mov x8, SYS_OPENAT
+        svc #0
+    ) endasm
+#else
+    asminline(
+        mov rax, SYS_OPEN
+        syscall
+    ) endasm
+#endif
+
+
+def sys_close(fd: int) -> None:
+    /*
+    * Chiude un file descriptor (syscall close). Un socket duplicato, per
+    * esempio da un fork, resta connesso finche' tutti i processi non hanno
+    * chiuso la loro copia: per interrompere la connessione c'e' sys_shutdown.
+    * argomenti:
+    *   fd: il file descriptor
+    * return: nessuno (procedura)
+    */
+#ifdef __aarch64__
+    asminline(
+        mov x8, SYS_CLOSE
+        svc #0
+    ) endasm
+#else
+    asminline(
+        mov rax, SYS_CLOSE
+        syscall
+    ) endasm
+#endif
+
+
+def sys_stat(path: str, statbuf: Stat) -> int:
+    /*
+    * Legge le informazioni di un file (dimensione, permessi, tempi) dal suo
+    * percorso (syscall stat).
+    * argomenti:
+    *   path: il percorso
+    *   statbuf: lo Stat da riempire
+    * return: 0 se riuscita, negativo in caso di errore
+    */
+#ifdef __aarch64__
+    raw = rt_alloc_up(A64_STAT_SIZE)
+    response = sys_newfstatat(AT_FDCWD, path, raw, 0)
+    if response == 0:
+        a64_stat_copy(raw, statbuf)
+    return response
+#else
+    asminline (
+        mov rax, SYS_STAT
+        syscall
+    ) endasm
+#endif
+
+
+def sys_fstat(fd: int, statbuf: Stat) -> int:
+    /*
+    * Come sys_stat, per un file descriptor aperto (syscall fstat).
+    * argomenti:
+    *   fd: il file descriptor
+    *   statbuf: lo Stat da riempire
+    * return: 0 se riuscita, negativo in caso di errore
+    */
+#ifdef __aarch64__
+    raw = rt_alloc_up(A64_STAT_SIZE)
+    response = sys_fstat_raw(fd, raw)
+    if response == 0:
+        a64_stat_copy(raw, statbuf)
+    return response
+#else
+    asminline(
+        mov rax, SYS_FSTAT
+        syscall
+    ) endasm
+#endif
+
+
+def sys_shutdown(fd: int, how: int) -> None:
+    /*
+    * Chiude la connessione di un socket in lettura, in scrittura o in
+    * entrambe (syscall shutdown), per tutti i processi che lo usano; close
+    * invece rilascia solo la propria copia del descrittore.
+    * argomenti:
+    *   fd: il socket
+    *   how: SHUT_RD, SHUT_WR o SHUT_RDWR
+    * return: nessuno (procedura)
+    */
+#ifdef __aarch64__
+    asminline(
+        mov x8, SYS_SHUTDOWN
+        svc #0
+    ) endasm
+#else
+    asminline(
+        mov rax, SYS_SHUTDOWN
+        syscall
+    )endasm
+#endif
+
+
+def sys_pread64(fd: int, buf: str, count: int, offset: int) -> int:
+    /*
+    * Legge byte da una posizione di un file senza spostarne la posizione
+    * corrente (syscall pread64).
+    * argomenti:
+    *   fd: il file descriptor
+    *   buf: dove scrivere i byte
+    *   count: quanti byte leggere al massimo
+    *   offset: la posizione nel file
+    * return: i byte letti, negativo in caso di errore
+    */
+#ifdef __aarch64__
+    asminline(
+        sxtw x2, w2
+        sxtw x3, w3
+        mov x8, SYS_PREAD64
+        svc #0
+    ) endasm
+#else
+    asminline(
+        mov r10, rcx
+        mov rax, SYS_PREAD64
+        syscall
+    )endasm
+#endif
+
+
+def sys_dup(fd: int) -> int:
+    /*
+    * Duplica un file descriptor (syscall dup): i due puntano alla stessa
+    * risorsa e condividono posizione e flag di stato.
+    * argomenti:
+    *   fd: il file descriptor
+    * return: il nuovo fd, il piu' basso libero; negativo in caso di errore
+    */
+#ifdef __aarch64__
+    asminline(
+        mov x8, SYS_DUP
+        svc #0
+    ) endasm
+#else
+    asminline (
+        mov rax, SYS_DUP
+        syscall
+    ) endasm
+#endif
+
+
+def sys_dup2(old_fd: int, new_fd: int) -> int:
+    /*
+    * Come sys_dup, ma sceglie il numero del nuovo fd (syscall dup2): se
+    * new_fd era aperto viene chiuso prima. Con old_fd uguale a new_fd non fa
+    * nulla, se old_fd e' aperto.
+    * argomenti:
+    *   old_fd: il file descriptor da duplicare
+    *   new_fd: il numero del nuovo fd
+    * return: new_fd, negativo in caso di errore
+    */
+#ifdef __aarch64__
+    if old_fd == new_fd:
+        response = sys_fcntl(old_fd, F_GETFD, 0)
+        if response < 0:
+            return response
+        return new_fd
+    return sys_dup3(old_fd, new_fd, 0)
+#else
+    asminline (
+        mov rax, SYS_DUP2
+        syscall
+    ) endasm
+#endif
+
+
+def sys_dup3(old_fd: int, new_fd: int, flag: int) -> int:
+    /*
+    * Come sys_dup2, applicando insieme dei flag (syscall dup3): con
+    * O_CLOEXEC il nuovo fd si chiude da solo a un execve. old_fd e new_fd
+    * devono essere diversi.
+    * argomenti:
+    *   old_fd: il file descriptor da duplicare
+    *   new_fd: il numero del nuovo fd
+    *   flag: 0 o O_CLOEXEC
+    * return: new_fd, negativo in caso di errore
+    */
+#ifdef __aarch64__
+    asminline(
+        mov x8, SYS_DUP3
+        svc #0
+    ) endasm
+#else
+    asminline (
+        mov rax, SYS_DUP3
+        syscall
+    ) endasm
+#endif

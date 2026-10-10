@@ -1,0 +1,363 @@
+
+/*
+* Linux (x86_64 e aarch64): i thread con la syscall clone. libstd/thread usa le
+* systhread_*, con il blocco di sincronizzazione descritto li' (i campi
+* SB_*).
+*/
+
+#include <libstd/wrapper/linux/process>
+#include <libstd/wrapper/linux/mem>
+
+
+#ifndef SYS_CLONE
+#ifdef __aarch64__
+#define SYS_CLONE 220
+#else
+#define SYS_CLONE 56
+#endif
+#endif
+
+#ifndef CLONE_VM
+/*
+* Condivide lo spazio di memoria tra padre e figlio
+*/
+#define CLONE_VM        256
+#endif
+
+#ifndef CLONE_FS
+/*
+* Condivide info filesystem (cwd, umask)
+*/
+#define CLONE_FS        512
+#endif
+
+#ifndef CLONE_FILES
+/*
+* Condivide file descriptors
+*/
+#define CLONE_FILES     1024
+#endif
+
+#ifndef CLONE_SIGHAND
+/*
+* Condivide signal handlers
+*/
+#define CLONE_SIGHAND   2048
+#endif
+
+#ifndef CLONE_THREAD
+/*
+* Stesso thread group/PID del chiamante
+*/
+#define CLONE_THREAD    65536
+#endif
+
+#ifndef CLONE_PARENT_SETTID
+/*
+* Il kernel scrive il tid del figlio all'indirizzo parent_tid
+*/
+#define CLONE_PARENT_SETTID 1048576
+#endif
+
+#ifndef CLONE_CHILD_CLEARTID
+/*
+* Quando il figlio esce il kernel azzera child_tid e sveglia chi aspetta
+* su quell'indirizzo con un futex: da li' lo stack non e' piu' in uso
+*/
+#define CLONE_CHILD_CLEARTID 2097152
+#endif
+
+#ifndef CLONE_SYSVSEM
+/*
+* La lista dei semafori System V da annullare, condivisa come fa
+* pthread_create della glibc. Su aarch64 la vuole qemu-user (senza,
+* la clone di un thread fallisce con EINVAL)
+*/
+#define CLONE_SYSVSEM 262144
+#endif
+
+#ifndef SYS_RT_SIGPROCMASK
+#ifdef __aarch64__
+#define SYS_RT_SIGPROCMASK 135
+#else
+#define SYS_RT_SIGPROCMASK 14
+#endif
+#endif
+
+#ifndef SYS_SET_TID_ADDRESS
+#ifdef __aarch64__
+#define SYS_SET_TID_ADDRESS 96
+#else
+#define SYS_SET_TID_ADDRESS 218
+#endif
+#endif
+
+#ifndef SYSTHREAD_MAP_FLAGS
+/*
+* MAP_PRIVATE | MAP_ANONYMOUS | MAP_STACK
+*/
+#define SYSTHREAD_MAP_FLAGS 131106
+#endif
+
+
+#pragma warning "Attenzione, i thread sono ancora in beta (sperimentali)"
+
+
+def systhread_alloc(stack_size: int) -> str:
+    /*
+    * Alloca con una sola mmap il blocco di sincronizzazione (la prima
+    * pagina), una pagina di guardia senza permessi, dove uno stack che sfora
+    * si ferma con un SIGSEGV, e lo stack, arrotondato a pagine.
+    * argomenti:
+    *   stack_size: i byte di stack
+    * return: il blocco di sincronizzazione, che e' anche l'inizio della
+    *   mmap; 0 se la mmap fallisce
+    */
+#ifdef __aarch64__
+    asminline(
+        sxtw x19, w0
+        add x19, x19, 4095
+        and x19, x19, -4096
+        add x19, x19, 8192
+        mov x0, 0
+        mov x1, x19
+        mov x2, 3
+        movz x3, (SYSTHREAD_MAP_FLAGS) & 0xFFFF
+        movk x3, ((SYSTHREAD_MAP_FLAGS) >> 16) & 0xFFFF, lsl 16
+        mov x4, -1
+        mov x5, 0
+        mov x8, SYS_MMAP
+        svc #0
+        cmn x0, 4096
+        b.hi .fail
+        mov x20, x0
+        str x19, [x20, SB_REGION_SIZE]
+        add x0, x20, 4096
+        mov x1, 4096
+        mov x2, 0
+        mov x8, SYS_MPROTECT
+        svc #0
+        mov x0, x20
+        b .out
+        .fail:
+            mov x0, 0
+    ) endasm
+#else
+    asminline(
+        movsxd r12, edi
+        add r12, 4095
+        and r12, -4096
+        add r12, 8192
+        xor edi, edi
+        mov rsi, r12
+        mov edx, 3
+        mov r10d, SYSTHREAD_MAP_FLAGS
+        mov r8, -1
+        xor r9d, r9d
+        mov eax, SYS_MMAP
+        syscall
+        cmp rax, -4096
+        ja .fail
+        mov r13, rax
+        mov [r13 + SB_REGION_SIZE], r12
+        lea rdi, [r13 + 4096]
+        mov esi, 4096
+        xor edx, edx
+        mov eax, SYS_MPROTECT
+        syscall
+        mov rax, r13
+        jmp .out
+        .fail:
+            xor eax, eax
+    ) endasm
+#endif
+
+
+def systhread_start(entry_fn: &(long, long) -> int, arg: long, sync: str) -> int:
+    /*
+    * Fa partire entry_fn(arg, stop) su un thread nuovo, con lo stack in
+    * cima alla mmap di systhread_alloc. Quando entry_fn ritorna il thread
+    * scrive SB_EXIT e prova a passare SB_STATE da SB_RUNNING a SB_FINISHED:
+    * se ci riesce esce e il kernel azzera SB_TID (CLONE_CHILD_CLEARTID), che
+    * e' cio' che aspetta systhread_wait; se invece trova SB_DETACHED libera
+    * da se' la mmap ed esce.
+    * argomenti:
+    *   entry_fn: la funzione del thread
+    *   arg: il primo argomento di entry_fn; il secondo e' l'indirizzo di
+    *     SB_STOP (thread_stop_requested)
+    *   sync: il blocco di systhread_alloc
+    * return: il tid del thread (> 0), -errno se la clone fallisce
+    */
+#ifdef __aarch64__
+    asminline(
+        str x0, [x2, SB_ENTRY]
+        str x1, [x2, SB_ARG]
+        mov x19, x2
+        ldr x9, [x19, SB_REGION_SIZE]
+        add x1, x19, x9
+        sub x1, x1, 16
+        str x19, [x1]
+        movz x0, (CLONE_VM | CLONE_FS | CLONE_FILES | CLONE_SIGHAND | CLONE_THREAD | CLONE_SYSVSEM | CLONE_PARENT_SETTID | CLONE_CHILD_CLEARTID) & 0xFFFF
+        movk x0, ((CLONE_VM | CLONE_FS | CLONE_FILES | CLONE_SIGHAND | CLONE_THREAD | CLONE_SYSVSEM | CLONE_PARENT_SETTID | CLONE_CHILD_CLEARTID) >> 16) & 0xFFFF, lsl 16
+        add x2, x19, SB_TID
+        mov x3, 0
+        mov x4, x2
+        mov x8, SYS_CLONE
+        svc #0
+        cbnz x0, .out
+
+        ldr x19, [sp]
+        add sp, sp, 16
+        ldr x0, [x19, SB_ARG]
+        add x1, x19, SB_STOP
+        ldr x9, [x19, SB_ENTRY]
+        blr x9
+        str w0, [x19, SB_EXIT]
+        mov w20, w0
+        add x10, x19, SB_STATE
+        .cas:
+            ldaxr w9, [x10]
+            cmp w9, SB_RUNNING
+            b.ne .detached
+            mov w11, SB_FINISHED
+            stlxr w12, w11, [x10]
+            cbnz w12, .cas
+        mov w0, w20
+        mov x8, SYS_EXIT
+        svc #0
+
+        .detached:
+            clrex
+            mov x9, -1
+            str x9, [sp, -16]!
+            mov x0, 0
+            mov x1, sp
+            mov x2, 0
+            mov x3, 8
+            mov x8, SYS_RT_SIGPROCMASK
+            svc #0
+            mov x0, 0
+            mov x8, SYS_SET_TID_ADDRESS
+            svc #0
+            mov x0, x19
+            ldr x1, [x19, SB_REGION_SIZE]
+            mov x8, SYS_MUNMAP
+            svc #0
+            mov w0, w20
+            mov x8, SYS_EXIT
+            svc #0
+    ) endasm
+#else
+    asminline(
+        mov [rdx + SB_ENTRY], rdi
+        mov [rdx + SB_ARG], rsi
+        mov r12, rdx
+        mov rsi, r12
+        add rsi, [r12 + SB_REGION_SIZE]
+        sub rsi, 16
+        mov [rsi], r12
+        mov rdi, CLONE_VM | CLONE_FS | CLONE_FILES | CLONE_SIGHAND | CLONE_THREAD | CLONE_PARENT_SETTID | CLONE_CHILD_CLEARTID
+        lea rdx, [r12 + SB_TID]
+        mov r10, rdx
+        xor r8d, r8d
+        mov eax, SYS_CLONE
+        syscall
+        test rax, rax
+        jnz .out
+
+        mov r12, [rsp]
+        add rsp, 16
+        mov rdi, [r12 + SB_ARG]
+        lea rsi, [r12 + SB_STOP]
+        call qword [r12 + SB_ENTRY]
+        mov [r12 + SB_EXIT], eax
+        mov r13d, eax
+        xor eax, eax
+        mov ecx, SB_FINISHED
+        lock cmpxchg dword [r12 + SB_STATE], ecx
+        jne .detached
+        mov edi, r13d
+        mov eax, SYS_EXIT
+        syscall
+
+        .detached:
+            mov rax, -1
+            push rax
+            xor edi, edi
+            mov rsi, rsp
+            xor edx, edx
+            mov r10d, 8
+            mov eax, SYS_RT_SIGPROCMASK
+            syscall
+            xor edi, edi
+            mov eax, SYS_SET_TID_ADDRESS
+            syscall
+            mov rdi, r12
+            mov rsi, [r12 + SB_REGION_SIZE]
+            mov eax, SYS_MUNMAP
+            syscall
+            mov edi, r13d
+            mov eax, SYS_EXIT
+            syscall
+    ) endasm
+#endif
+
+
+def systhread_handle(sync: str) -> long:
+    /*
+    * Restituisce l'handle di sistema del thread: su Linux basta il tid.
+    * argomenti:
+    *   sync: il blocco di systhread_alloc
+    * return: 0
+    */
+    return 0 as long
+
+
+def systhread_wait(sync: str, os_handle: long) -> None:
+    /*
+    * Aspetta che il thread sia uscito: il kernel azzera SB_TID e sveglia chi
+    * aspetta su quell'indirizzo (CLONE_CHILD_CLEARTID).
+    * argomenti:
+    *   sync: il blocco di systhread_alloc
+    *   os_handle: non usato su Linux
+    * return: nessuno (procedura)
+    */
+    tid = peek_int(sync + SB_TID)
+    while tid != 0:
+        sys_futex_wait(sync + SB_TID, tid)
+        tid = peek_int(sync + SB_TID)
+
+
+def systhread_release(sync: str, os_handle: long) -> None:
+    /*
+    * Libera la mmap di systhread_alloc, dopo systhread_wait o se la clone e'
+    * fallita.
+    * argomenti:
+    *   sync: il blocco di systhread_alloc
+    *   os_handle: non usato su Linux
+    * return: nessuno (procedura)
+    */
+#ifdef __aarch64__
+    asminline(
+        ldr x1, [x0, SB_REGION_SIZE]
+        mov x8, SYS_MUNMAP
+        svc #0
+    ) endasm
+#else
+    asminline(
+        mov rsi, [rdi + SB_REGION_SIZE]
+        mov eax, SYS_MUNMAP
+        syscall
+    ) endasm
+#endif
+
+
+def systhread_detached(os_handle: long) -> None:
+    /*
+    * Chiamata quando il thread viene staccato: su Linux non fa nulla, il
+    * thread libera da se' la sua memoria (systhread_start).
+    * argomenti:
+    *   os_handle: non usato su Linux
+    * return: nessuno (procedura)
+    */
+    return

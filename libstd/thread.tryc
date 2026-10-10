@@ -1,0 +1,189 @@
+/*
+* Thread veri (memoria condivisa con chi li crea), con la stessa API su
+* Linux (clone) e su Windows (CreateThread): i dettagli dei due sistemi
+* stanno in wrapper/<os>/systhread.
+*
+* Uso tipico:
+*   def worker(x: long, stop: long) -> int:
+*       // vedi il limite sotto per cosa si puo' fare qui dentro
+*       while thread_stop_requested(stop) == 0:
+*           ...
+*       return 42
+*
+*   t = thread_spawn(worker, 0, CHILD_STACK_SIZE)
+*   if t.tid < 0:
+*       print("thread_spawn fallita\n")
+*   thread_request_stop(t)
+*   result = thread_join(t)     // aspetta worker, poi ne libera la memoria
+*
+* La funzione del thread riceve 'arg' e l'indirizzo del suo segnale di
+* stop (thread_stop_requested), anche se non lo usa. Ogni Thread finisce
+* in uno di due modi:
+*   - thread_join: aspetta la fine senza busy-wait, restituisce il valore
+*     di ritorno di worker e libera stack e blocco di sincronizzazione
+*   - thread_detach: nessuno aspetta; quando worker ritorna il thread
+*     libera da se' la sua memoria
+* Un Thread ne' joinato ne' staccato resta in leak. Non c'e' modo di
+* fermare un thread da fuori: thread_request_stop lo chiede, e il thread
+* si ferma quando lo legge.
+*
+* Limite: l'allocatore ad arena (dietro 'new', la
+* concatenazione di stringhe, rt_alloc) e' globale e non thread-safe. La
+* funzione del thread non deve allocare: niente 'new', niente '+' su
+* stringhe, niente str o classi da ricevere o restituire. Vanno bene
+* aritmetica su int/long/bool/char e libstd/sync (peek_int, poke_int,
+* atomic_add32, atomic_cas32, sys_futex_wait/wake) per condividere dati
+* con altri thread. raw_alloc/raw_free solo su Linux: su Windows passano
+* da una tabella globale del runtime (le regioni per il fork).
+*/
+#include <libstd/process>
+#include <libstd/sync>
+
+
+/*
+* Il blocco di sincronizzazione di un thread, in memoria grezza (gli
+* asminline dei wrapper usano gli stessi offset):
+*   SB_STATE        int: SB_RUNNING, poi SB_DETACHED o SB_FINISHED
+*   SB_EXIT         int: il valore di ritorno di entry_fn
+*   SB_STOP         int: 1 dopo thread_request_stop
+*   SB_TID          int: id del thread; su Linux lo azzera il kernel
+*                   quando il thread esce
+*   SB_ENTRY        long: entry_fn
+*   SB_ARG          long: arg
+*   SB_HANDLE       long: su Windows l'HANDLE del thread
+*   SB_REGION_SIZE  long: su Linux i byte della mmap (blocco, guardia,
+*                   stack), su Windows i byte di stack
+*/
+#define SB_STATE 0
+#define SB_EXIT 4
+#define SB_STOP 8
+#define SB_TID 12
+#define SB_ENTRY 16
+#define SB_ARG 24
+#define SB_HANDLE 32
+#define SB_REGION_SIZE 40
+#define SB_SIZE 48
+
+#define SB_RUNNING 0
+#define SB_DETACHED 1
+#define SB_FINISHED 2
+
+
+#ifdef __unix__
+#include <libstd/wrapper/linux/systhread>
+#else
+#include <libstd/wrapper/windows/systhread>
+#endif
+
+
+class Thread:
+    // id del thread, negativo se thread_spawn e' fallita
+    tid int
+    // il blocco di sincronizzazione (SB_*)
+    sync_block str
+    // su Windows l'HANDLE del thread, 0 su Linux
+    os_handle long
+    // 1 dopo thread_join o thread_detach
+    finished int
+
+
+def thread_spawn(entry_fn: &(long, long) -> int, arg: long, stack_size: int) -> Thread:
+    /*
+    * Crea un thread che esegue entry_fn(arg, stop). entry_fn non deve
+    * allocare memoria (vedi l'inizio del file).
+    * argomenti:
+    *   entry_fn: la funzione del thread, per nome
+    *   arg: il primo argomento di entry_fn
+    *   stack_size: i byte di stack, di solito CHILD_STACK_SIZE
+    * return: il Thread, con tid negativo se non e' partito (-12 senza
+    *   memoria, -errno dal sistema); va poi passato a thread_join o
+    *   thread_detach
+    */
+    handle = new Thread()
+    handle.finished = 0
+    handle.os_handle = 0 as long
+    handle.sync_block = systhread_alloc(stack_size)
+    if handle.sync_block == 0:
+        handle.tid = -12
+        return handle
+
+    handle.tid = systhread_start(entry_fn, arg, handle.sync_block)
+    if handle.tid < 0:
+        systhread_release(handle.sync_block, handle.os_handle)
+        return handle
+
+    handle.os_handle = systhread_handle(handle.sync_block)
+    return handle
+
+
+def thread_join(handle: Thread) -> int:
+    /*
+    * Aspetta che il thread finisca, senza attesa attiva, e ne libera la
+    * memoria.
+    * argomenti:
+    *   handle: il Thread di thread_spawn
+    * return: il valore restituito da entry_fn; handle.tid se era negativo;
+    *   -1, con un messaggio, se il Thread era gia' stato joinato o staccato
+    */
+    if handle.tid < 0:
+        return handle.tid
+
+    if handle.finished == 1:
+        print("thread_join: errore, questo Thread e' gia' stato joinato o staccato\n")
+        return -1
+
+    handle.finished = 1
+    systhread_wait(handle.sync_block, handle.os_handle)
+    result = peek_int(handle.sync_block + SB_EXIT)
+    systhread_release(handle.sync_block, handle.os_handle)
+    return result
+
+
+def thread_detach(handle: Thread) -> int:
+    /*
+    * Lascia proseguire il thread da solo: quando entry_fn ritorna libera la
+    * sua memoria, e il valore di ritorno si perde.
+    * argomenti:
+    *   handle: il Thread di thread_spawn
+    * return: 0; handle.tid se era negativo; -1, con un messaggio, se il
+    *   Thread era gia' stato joinato o staccato
+    */
+    if handle.tid < 0:
+        return handle.tid
+
+    if handle.finished == 1:
+        print("thread_detach: errore, questo Thread e' gia' stato joinato o staccato\n")
+        return -1
+
+    handle.finished = 1
+    if atomic_cas32(handle.sync_block + SB_STATE, SB_RUNNING, SB_DETACHED) == SB_RUNNING:
+        systhread_detached(handle.os_handle)
+        return 0
+
+    systhread_wait(handle.sync_block, handle.os_handle)
+    systhread_release(handle.sync_block, handle.os_handle)
+    return 0
+
+
+def thread_request_stop(handle: Thread) -> None:
+    /*
+    * Chiede al thread di fermarsi: entry_fn lo vede con
+    * thread_stop_requested e decide quando tornare. Va chiamata prima di
+    * thread_join o thread_detach.
+    * argomenti:
+    *   handle: il Thread di thread_spawn
+    * return: nessuno (procedura)
+    */
+    if handle.tid >= 0 and handle.finished == 0:
+        poke_int(handle.sync_block + SB_STOP, 1)
+
+
+def thread_stop_requested(stop: long) -> int:
+    /*
+    * Dentro il thread, controlla se e' stato chiesto di fermarsi.
+    * argomenti:
+    *   stop: il secondo argomento di entry_fn
+    * return: 1 se e' stato chiesto, 0 altrimenti
+    */
+    unsafe:
+        return peek_int(stop as str)

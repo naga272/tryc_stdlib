@@ -1,0 +1,270 @@
+#include <libstd/stdio>
+#include <libstd/macro>
+
+
+// protocolli
+#define TCP 6
+#define UDP 17
+
+// sock_type
+#define SOCK_STREAM 1
+
+// ip_family
+#define AF_INET 2 // ipv4
+
+/* ==== flags per setsockopt ==== */
+
+#ifndef TCP_NODELAY
+/*
+* Linux aspetta a inviare un pacchetto finché non ha abbastanza dati per riempire il frame di rete.
+* Attivando questo flag, ogni singola scrittura viene spedita all'istante.
+*/
+#define TCP_NODELAY 1
+#endif
+
+#define SOL_SOCKET 1
+
+#define SO_REUSEADDR 2
+
+#ifndef SO_REUSEPORT
+#define SO_REUSEPORT 15
+#endif
+
+
+#ifndef IPPROTO_IP0
+#define IPPROTO_IP0 0
+#endif
+
+#ifndef IPPROTO_IPV6
+#define IPPROTO_IPV6 41
+#endif
+
+#ifndef IPPROTO_TCP
+#define IPPROTO_TCP 6
+#endif
+
+#ifndef IPPROTO_UDP
+#define IPPROTO_UDP 17
+#endif
+
+
+
+/*
+* Class Sockaddr_in:
+*
+* sin_fam:
+*   - sin_fam: 2 bytes
+* door:
+*   - door: 2 bytes
+* ip_addr:
+*    - first: 1 byte
+*    - second: 1 byte
+*    - third: 1 byte
+*    - fourth: 1 byte
+* padding: 8 bytes
+*/
+
+class Sockaddr_in --no-padding:
+    sin_fam_door int
+    ip_addr int
+    padding str
+
+
+
+def set_sin_fam(addr: Sockaddr_in, sin_fam: int, protocol: int) -> None:
+    /*
+    * Scrive la famiglia di indirizzi (es. AF_INET) in un Sockaddr_in.
+    * argomenti:
+    *   addr: l'indirizzo
+    *   sin_fam: la famiglia
+    *   protocol: non usato
+    * return: nessuno (procedura)
+    */
+    addr.sin_fam_door = (addr.sin_fam_door & (-1 << 16)) | (sin_fam & 0xffff)
+
+
+def set_door(addr: Sockaddr_in, door: int) -> None:
+    /*
+    * Scrive la porta in un Sockaddr_in, nell'ordine di byte della rete. Con
+    * una porta fuori da 0-65535 stampa un messaggio e termina il programma.
+    * argomenti:
+    *   addr: l'indirizzo
+    *   door: la porta
+    * return: nessuno (procedura)
+    */
+    if door < 0 or door > 65535:
+        print("error! invalid port!\n")
+        exit(0)
+
+    swapped = ((door & 0xff) << 8) | ((door >> 8) & 0xff)
+    addr.sin_fam_door = (addr.sin_fam_door & 0xffff) | (swapped << 16)
+
+
+def set_sockip(addr: Sockaddr_in, first: int, second: int, third: int, fourth: int) -> None:
+    /*
+    * Scrive l'indirizzo IPv4 first.second.third.fourth in un Sockaddr_in.
+    * Con una parte fuori da 0-255 stampa un messaggio e termina il programma.
+    * argomenti:
+    *   addr: l'indirizzo
+    *   first, second, third, fourth: le quattro parti dell'indirizzo
+    * return: nessuno (procedura)
+    */
+    if first > 255 or first < 0:
+        print("error! first can't be more than value 255! or lower than 0\n")
+        print("value" + itoa(first))
+        exit(1)
+    
+    if second > 255 or second < 0:
+        print("error! second can't be more than value 255! or lower than 0\n")
+        print("value" + itoa(second))
+        exit(1)
+    
+    if third > 255 or third < 0:
+        print("error! third can't be more than value 255 or lower than 0!\n")
+        print("value" + itoa(third))
+        exit(1)
+    
+    if fourth > 255 or fourth < 0:
+        print("error! fourth can't be more than value 255! or lower than 0\n")
+        print("value" + itoa(fourth))
+        exit(1)
+
+    addr.ip_addr = first | (second << 8) | (third << 16) | (fourth << 24)
+
+
+
+#ifdef __unix__
+#include <libstd/wrapper/linux/sysnet>
+#else
+#include <libstd/wrapper/windows/sysnet>
+#endif
+
+
+/* socket: uguali su Linux e Windows, le sys_* sono nei wrapper */
+
+def socket(ip_family: int, sock_type: int, protocol: int) -> SOCKET:
+    /*
+    * Crea un socket. Su errore stampa un messaggio e termina il programma.
+    * argomenti:
+    *   ip_family: la famiglia di indirizzi, es. AF_INET
+    *   sock_type: il tipo, es. SOCK_STREAM
+    *   protocol: il protocollo, es. TCP o UDP
+    * return: il socket
+    */
+    response = sys_socket(ip_family, sock_type, protocol)
+    if response < 0:
+        print("socket creation error!")
+        exit(0)
+    return response
+
+
+def bind(fd_sock: SOCKET, addr: Sockaddr_in) -> int:
+    /*
+    * Lega un socket a un indirizzo. Su errore stampa un messaggio e
+    * termina il programma.
+    * argomenti:
+    *   fd_sock: il socket
+    *   addr: l'indirizzo
+    * return: 0
+    */
+    response = sys_bind(fd_sock, addr)
+    if response < 0:
+        print("Binding error!\n")
+        exit(0)
+    return response
+
+
+def listen(sock: SOCKET, size_queue: int) -> int:
+    /*
+    * Mette un socket in ascolto. Su errore stampa un messaggio e termina il
+    * programma.
+    * argomenti:
+    *   sock: il socket
+    *   size_queue: quante connessioni possono restare in attesa
+    * return: 0
+    */
+    response = sys_listen(sock, size_queue)
+    if response < 0:
+        print("listen error on socket!\n")
+        exit(0)
+    return response
+
+
+def accept(sock: SOCKET, sock_info: Sockaddr_in) -> SOCKET:
+    /*
+    * Aspetta una connessione su un socket in ascolto e la accetta. Su
+    * errore stampa un messaggio e termina il programma.
+    * argomenti:
+    *   sock: il socket in ascolto
+    *   sock_info: dove scrivere l'indirizzo del client
+    * return: il socket della connessione
+    */
+    len_sock_addr_in = 16
+    response = sys_accept(sock, sock_info, &len_sock_addr_in)
+    if response < 0:
+        print("errore durante l'accept: value: " + itoa(response) + "\n")
+        exit(0)
+    return response
+
+
+def connect(sock: SOCKET, addr: Sockaddr_in) -> int:
+    /*
+    * Connette un socket a un indirizzo. Su errore stampa un messaggio e
+    * termina il programma.
+    * argomenti:
+    *   sock: il socket
+    *   addr: l'indirizzo del server
+    * return: 0
+    */
+    response = sys_connect(sock, addr)
+    if response < 0:
+        print("connect error!\n")
+        exit(0)
+    return response
+
+
+/* opzioni socket */
+
+def set_sockopt(sock: SOCKET, level: int, optname: int, value: int) -> int:
+    /*
+    * Imposta un'opzione intera di un socket.
+    * argomenti:
+    *   sock: il socket
+    *   level: il livello, es. SOL_SOCKET o IPPROTO_TCP
+    *   optname: l'opzione, es. SO_REUSEADDR o TCP_NODELAY
+    *   value: il valore
+    * return: 0, negativo su errore
+    */
+    v = value
+    return sys_setsockopt(sock, level, optname, &v)
+
+
+def get_sockopt(sock: SOCKET, level: int, optname: int) -> (int, int):
+    /*
+    * Legge un'opzione intera di un socket.
+    * argomenti:
+    *   sock: il socket
+    *   level: il livello, es. SOL_SOCKET o IPPROTO_TCP
+    *   optname: l'opzione
+    * return: (valore, 0), oppure (0, errore negativo)
+    */
+    value = 0
+    response = sys_getsockopt(sock, level, optname, &value)
+    if response < 0:
+        return 0, response
+
+    return value, 0
+
+
+def epoll_create1(flags: int) -> int:
+    /*
+    * Crea un'istanza epoll. Solo su Linux: su Windows non compila.
+    * argomenti:
+    *   flags: i flag di epoll_create1, di solito 0
+    * return: il file descriptor, negativo su errore
+    */
+#ifdef __unix__
+    return sys_epoll_create1(flags)
+#else
+    #pragma error "epoll_create1() not ready for Windows"
+#endif

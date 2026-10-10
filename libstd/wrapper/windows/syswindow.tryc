@@ -1,0 +1,142 @@
+/*
+* Windows x64: le finestre di libstd/window con user32. 'display' e'
+* l'HINSTANCE del programma, 'window' l'HWND: quello che vuole
+* vkCreateWin32SurfaceKHR. La procedura della classe e' DefWindowProcA
+* stessa (da GetProcAddress), quindi nessuna callback in TryC: la X la
+* gestisce Windows, che distrugge la finestra.
+*/
+
+#include <libstd/wrapper/windows/kernel32>
+
+libextern <user32.dll>
+
+// titolo, menu di sistema e riduzione a icona: niente bordo
+// ridimensionabile ne' massimizza, la swapchain ha una dimensione fissa
+#define WIN_WINDOW_STYLE 13238272           // 0x00CA0000
+#define CW_USEDEFAULT (-2147483647 - 1)     // 0x80000000
+#define SW_SHOW 5
+#define PM_REMOVE 1
+#define IDC_ARROW 32512
+#define COLOR_WINDOW 5
+#define ERROR_CLASS_ALREADY_EXISTS 1410
+
+// byte di WNDCLASSEXA e di MSG
+#define WNDCLASSEXA_SIZE 80
+#define MSG_SIZE 48
+
+
+// WNDCLASSEXA
+class WinWndClassEx --no-padding:
+    size int
+    style int
+    wndproc long
+    cls_extra int
+    wnd_extra int
+    instance long
+    icon long
+    cursor long
+    background long
+    menu_name long
+    class_name str
+    icon_small long
+
+
+// RECT
+class WinRect --no-padding:
+    left int
+    top int
+    right int
+    bottom int
+
+
+extern def RegisterClassExA(wc: WinWndClassEx) -> int
+extern def UnregisterClassA(class_name: str, instance: long) -> int
+extern def LoadCursorA(instance: long, name: long) -> long
+extern def AdjustWindowRectEx(rect: WinRect, style: int, menu: int, ex_style: int) -> int
+extern def CreateWindowExA(ex_style: int, class_name: str, title: str, style: int, x: int, y: int, width: int, height: int, parent: long, menu: long, instance: long, param: long) -> long
+extern def ShowWindow(window: long, cmd: int) -> int
+extern def UpdateWindow(window: long) -> int
+extern def IsWindow(window: long) -> int
+extern def DestroyWindow(window: long) -> int
+extern def PeekMessageA(msg: str, window: long, filter_min: int, filter_max: int, remove: int) -> int
+extern def TranslateMessage(msg: str) -> int
+extern def DispatchMessageA(msg: str) -> long
+
+
+def window_poll(display: long, window: long) -> int:
+    /*
+    * Smaltisce i messaggi in coda; la X della finestra la gestisce Windows,
+    * che la distrugge. Va chiamata spesso, o Windows segna la finestra come
+    * "non risponde".
+    * argomenti:
+    *   display, window: quelli di window_open
+    * return: 1 se la finestra e' aperta, 0 se e' stata chiusa
+    */
+    msg = rt_alloc_up(MSG_SIZE)
+    while PeekMessageA(msg, 0 as long, 0, 0, PM_REMOVE) != 0:
+        TranslateMessage(msg)
+        DispatchMessageA(msg)
+
+    if IsWindow(window) == 0:
+        return 0
+    return 1
+
+
+def window_open(title: str, width: int, height: int) -> (long, long):
+    /*
+    * Apre una finestra di dimensione fissa, con un'area client di width x
+    * height pixel; se fallisce termina il programma.
+    * argomenti:
+    *   title: il titolo
+    *   width, height: la dimensione dell'area client
+    * return: (display, window): l'HINSTANCE del programma e l'HWND
+    */
+    instance = GetModuleHandleA(0 as str)
+
+    wc = new WinWndClassEx()
+    wc.size = WNDCLASSEXA_SIZE
+    wc.style = 0
+    wc.wndproc = GetProcAddress(GetModuleHandleA("user32.dll"), "DefWindowProcA")
+    wc.cls_extra = 0
+    wc.wnd_extra = 0
+    wc.instance = instance
+    wc.icon = 0 as long
+    wc.cursor = LoadCursorA(0 as long, IDC_ARROW as long)
+    wc.background = (COLOR_WINDOW + 1) as long
+    wc.menu_name = 0 as long
+    wc.class_name = "TryCWindow"
+    wc.icon_small = 0 as long
+
+    if (RegisterClassExA(wc) & 65535) == 0 and GetLastError() != ERROR_CLASS_ALREADY_EXISTS:
+        print("Error! RegisterClassExA failed\n")
+        exit(1)
+
+    rect = new WinRect()
+    rect.left = 0
+    rect.top = 0
+    rect.right = width
+    rect.bottom = height
+    AdjustWindowRectEx(rect, WIN_WINDOW_STYLE, 0, 0)
+
+    window = CreateWindowExA(0, "TryCWindow", title, WIN_WINDOW_STYLE, CW_USEDEFAULT, CW_USEDEFAULT, rect.right - rect.left, rect.bottom - rect.top, 0 as long, 0 as long, instance, 0 as long)
+    if window == (0 as long):
+        print("Error! CreateWindowExA failed\n")
+        exit(1)
+
+    ShowWindow(window, SW_SHOW)
+    UpdateWindow(window)
+    window_poll(instance, window)
+    return instance, window
+
+
+def window_close(display: long, window: long) -> None:
+    /*
+    * Chiude la finestra, se e' ancora aperta, e toglie la sua classe.
+    * argomenti:
+    *   display, window: quelli di window_open
+    * return: nessuno (procedura)
+    */
+    if IsWindow(window) != 0:
+        DestroyWindow(window)
+    window_poll(display, window)
+    UnregisterClassA("TryCWindow", display)
